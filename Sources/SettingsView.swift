@@ -321,6 +321,16 @@ struct SettingsView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
+                    Text("Custom dictionary").font(.subheadline.weight(.medium))
+                    TextEditor(text: $state.vocabulary)
+                        .font(.callout)
+                        .frame(height: 56)
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.gray.opacity(0.3)))
+                    Text("Words you use often that get misheard — names, jargon, acronyms. Separate them with commas (e.g. Gemini, Kubernetes, Ionut, GraphQL) and Gemini will prefer these exact spellings.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Transcription instruction").font(.subheadline.weight(.medium))
                     TextEditor(text: $state.instruction)
                         .font(.callout)

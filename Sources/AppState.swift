@@ -50,6 +50,9 @@ final class AppState: ObservableObject {
     @Published var typeInsteadOfPaste: Bool { didSet { d.set(typeInsteadOfPaste, forKey: K.type) } }
     @Published var playSounds: Bool         { didSet { d.set(playSounds, forKey: K.sounds) } }
     @Published var instruction: String      { didSet { d.set(instruction, forKey: K.instruction) } }
+    /// Comma-separated terms the speaker uses often (names, jargon, acronyms) that
+    /// Gemini should prefer the exact spelling of — see `vocabularyDirective`.
+    @Published var vocabulary: String        { didSet { d.set(vocabulary, forKey: K.vocabulary) } }
     /// Safety cap: auto-stop a recording after this many seconds (0 = no cap).
     @Published var maxRecordingSeconds: Int { didSet { d.set(maxRecordingSeconds, forKey: K.maxRecording) } }
     /// When on, asks Gemini to strip filler words / disfluencies from the text.
@@ -83,6 +86,7 @@ final class AppState: ObservableObject {
         static let model = "model", triggerMode = "triggerMode", keyCode = "hotkeyKeyCode"
         static let mods = "hotkeyMods", insert = "insertAtCursor", copy = "copyToClipboard"
         static let type = "typeInsteadOfPaste", sounds = "playSounds", instruction = "instruction"
+        static let vocabulary = "vocabulary"
         static let recents = "recents", configured = "configured", maxRecording = "maxRecordingSeconds"
         static let removeFillers = "removeFillers", muteWhileRecording = "muteWhileRecording"
         static let shotEnabled = "screenshotsEnabled", shotKey = "screenshotKeyCode", shotMods = "screenshotMods"
@@ -106,9 +110,36 @@ final class AppState: ObservableObject {
     punctuation so the text reads cleanly.
     """
 
+    /// Built from the user's comma-separated `vocabulary`. Tells Gemini to prefer the
+    /// exact spelling/capitalization of frequently-used or easily-misheard terms
+    /// (names, jargon, acronyms). Empty when no terms are entered, so it adds nothing
+    /// to the prompt by default.
+    var vocabularyDirective: String {
+        let terms = AppState.vocabularyTerms(vocabulary)
+        guard !terms.isEmpty else { return "" }
+        return """
+        The speaker often uses the following terms. When you hear a word or phrase that \
+        closely matches one of these, transcribe it using exactly this spelling and \
+        capitalization: \(terms.joined(separator: ", ")).
+        """
+    }
+
+    /// Splits the raw comma-separated field into trimmed, de-duplicated, non-empty terms.
+    static func vocabularyTerms(_ raw: String) -> [String] {
+        var seen = Set<String>()
+        return raw
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+    }
+
     /// The transcription prompt actually sent to Gemini, with opt-in add-ons applied.
     var effectiveInstruction: String {
-        removeFillers ? instruction + "\n\n" + AppState.fillerDirective : instruction
+        var prompt = instruction
+        if removeFillers { prompt += "\n\n" + AppState.fillerDirective }
+        let vocab = vocabularyDirective
+        if !vocab.isEmpty { prompt += "\n\n" + vocab }
+        return prompt
     }
 
     init() {
@@ -132,6 +163,7 @@ final class AppState: ObservableObject {
         typeInsteadOfPaste = d.object(forKey: K.type)    as? Bool ?? false
         playSounds         = d.object(forKey: K.sounds)  as? Bool ?? true
         instruction        = d.string(forKey: K.instruction) ?? AppState.defaultInstruction
+        vocabulary         = d.string(forKey: K.vocabulary) ?? ""
         maxRecordingSeconds = d.object(forKey: K.maxRecording) as? Int ?? 60
         removeFillers       = d.object(forKey: K.removeFillers) as? Bool ?? false
         muteWhileRecording  = d.object(forKey: K.muteWhileRecording) as? Bool ?? true

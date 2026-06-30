@@ -24,10 +24,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var transcribeGeneration = 0
     private var engineRetry: Timer?
     private var recordTimer: Timer?
+    private var silenceTimer: Timer?
     private var iconAnimTimer: Timer?
     private var iconAnimPhase = 0
 
     private let minimumDuration: TimeInterval = 0.3
+
+    // No-audio detection: if the mic produces nothing above `silenceThreshold` dBFS
+    // within `silenceGrace` seconds of starting, assume it's muted/off and bail out
+    // with an error rather than letting the user talk into silence. The threshold sits
+    // well above a dead mic's floor (~-120 dBFS) yet far below any real speech, so a
+    // working mic clears it the moment the user makes a sound.
+    private let silenceThreshold: Float = -60
+    private let silenceGrace: TimeInterval = 4
+    /// Set true once any real input level is seen; once true the take is never aborted
+    /// for silence (so a natural pause mid-dictation can't trip the watchdog).
+    private var sawAudioSignal = false
 
     // MARK: Lifecycle
 
@@ -145,6 +157,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsMI.target = self
         menu.addItem(settingsMI)
 
+        let aboutMI = NSMenuItem(title: "About AI Buddy", action: #selector(showAbout), keyEquivalent: "")
+        aboutMI.target = self
+        menu.addItem(aboutMI)
+
         let quitMI = NSMenuItem(title: "Quit AI Buddy", action: #selector(quit), keyEquivalent: "q")
         quitMI.target = self
         menu.addItem(quitMI)
@@ -229,6 +245,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Recording flow
 
     private func startRecording() {
+        // A new start request while a transcription is still running means "drop that
+        // one, I'd rather talk again" — cancel the in-flight request and fall through
+        // into a fresh recording instead of ignoring the press.
+        if case .transcribing = state.status { resetToIdle() }
+
         guard state.status.canStartRecording else { return }
 
         switch Permissions.micStatus() {
@@ -399,12 +420,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.stopAndTranscribe() // hit the safety cap — wrap up the take
             }
         }
+        startSilenceMonitor()
     }
 
     private func stopRecordTimer() {
         recordTimer?.invalidate()
         recordTimer = nil
+        stopSilenceMonitor()
         statusItem.button?.title = ""
+    }
+
+    // MARK: No-audio watchdog (catches a muted/off mic recording silence)
+
+    /// Polls the input level at the start of a take. If a real signal shows up, the
+    /// mic is live and we stop watching. If the grace window passes with nothing but
+    /// silence, the mic is almost certainly muted or off — abort and tell the user.
+    private func startSilenceMonitor() {
+        sawAudioSignal = false
+        silenceTimer?.invalidate()
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+            guard let self, self.state.status == .recording else { return }
+            if self.recorder.peakLevel() > self.silenceThreshold {
+                self.sawAudioSignal = true
+                self.stopSilenceMonitor() // mic is live — no need to keep checking
+                return
+            }
+            if self.recorder.currentTime >= self.silenceGrace {
+                self.handleNoAudioDetected()
+            }
+        }
+    }
+
+    private func stopSilenceMonitor() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+    }
+
+    /// The mic produced only silence after starting — discard the take and surface a
+    /// clear error so the user fixes the mic instead of talking into the void.
+    private func handleNoAudioDetected() {
+        guard state.status == .recording else { return }
+        // Discard the silent take and restore audio, like a cancel, but signal an error
+        // instead of a clean stop.
+        stopRecordTimer() // also stops the no-audio watchdog
+        if let result = recorder.stop() { try? FileManager.default.removeItem(at: result.url) }
+        unmuteAudioIfMuted()
+        if state.playSounds { Sound.error() }
+        state.status = .error("No sound from the microphone — it looks muted or off.")
+        refreshUI()
+        resetIdleSoon()
+        // A banner is easy to miss (and needs Notification permission), so show a dialog
+        // the user can't overlook — they may have been talking, not watching the screen.
+        presentNoAudioAlert()
+    }
+
+    /// Foreground, modal warning that the mic captured nothing, with a shortcut to the
+    /// Sound settings where input is muted/selected.
+    private func presentNoAudioAlert() {
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "No sound was recorded"
+            alert.informativeText = "Your microphone appears to be muted or off, so nothing was captured. Check it in System Settings ▸ Sound ▸ Input, then try again."
+            alert.addButton(withTitle: "Open Sound Settings")
+            alert.addButton(withTitle: "OK")
+            if alert.runModal() == .alertFirstButtonReturn,
+               let url = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension") {
+                NSWorkspace.shared.open(url)
+            }
+        }
     }
 
     private func updateElapsedTitle() {
@@ -445,6 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleError(_ message: String) {
         stopTranscribeWatchdog()
+        if state.playSounds { Sound.error() }
         state.status = .error(message)
         Notify.show("Transcription failed", message)
         refreshUI()
@@ -562,6 +648,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Modal About panel: app identity, version, and a button out to the website.
+    @objc private func showAbout() {
+        let website = "claude.co/ai-buddy"
+        let websiteURL = URL(string: "https://\(website)")
+
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? ""
+        let build = info?["CFBundleVersion"] as? String ?? ""
+        let versionLine = version.isEmpty ? "" : "Version \(version)\(build.isEmpty ? "" : " (\(build))")\n\n"
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.icon = NSApp.applicationIconImage
+        alert.messageText = "AI Buddy"
+        alert.informativeText = """
+        \(versionLine)Push-to-talk dictation for your Mac. Press your hotkey, speak, \
+        and Gemini transcribes it straight to your cursor.
+
+        \(website)
+        """
+        alert.addButton(withTitle: "Visit Website")
+        alert.addButton(withTitle: "OK")
+        if alert.runModal() == .alertFirstButtonReturn, let websiteURL {
+            NSWorkspace.shared.open(websiteURL)
+        }
     }
 
     @objc private func quit() { NSApp.terminate(nil) }

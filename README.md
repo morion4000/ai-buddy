@@ -30,6 +30,46 @@ open "build/AI Buddy.app"
 
 That's it. A 🎙️ mic icon appears in your menu bar.
 
+## Building a release DMG
+
+To package the app into a distributable disk image, run:
+
+```bash
+./make-dmg.sh
+```
+
+This builds the app (via `build.sh`), then produces **`build/AI Buddy.dmg`** — the
+`.app` plus an `/Applications` symlink, so users just drag AI Buddy onto
+Applications to install. If a *Developer ID Application* identity is in your
+keychain, both the app and the DMG are signed with it automatically.
+
+| Variable | Effect |
+|---|---|
+| `SKIP_BUILD=1` | Reuse the existing `build/AI Buddy.app` instead of rebuilding. |
+| `NOTARIZE=1` | Submit the DMG to Apple's notary service and staple the ticket. |
+| `NOTARY_PROFILE` | notarytool credential profile to use (default `AI Buddy`). |
+| `SIGN_IDENTITY` | Force a specific signing identity. |
+
+### Notarizing for distribution
+
+A signed-but-unnotarized DMG still triggers a Gatekeeper warning ("Apple could
+not verify…") on other Macs. To ship without warnings, notarize it. Store an
+[app-specific password](https://support.apple.com/102654) once:
+
+```bash
+xcrun notarytool store-credentials "AI Buddy" \
+  --apple-id you@example.com --team-id YOURTEAMID
+```
+
+Then build and notarize in one step:
+
+```bash
+NOTARIZE=1 ./make-dmg.sh
+```
+
+The script uploads the DMG, waits for Apple's verdict, and staples the ticket so
+the image passes Gatekeeper offline.
+
 ## First-time setup
 
 The Settings window opens automatically on first launch. You'll need to:

@@ -26,6 +26,7 @@ final class Recorder: NSObject, AVAudioRecorderDelegate {
 
         let rec = try AVAudioRecorder(url: file, settings: settings)
         rec.delegate = self
+        rec.isMeteringEnabled = true // so we can detect a muted/off mic recording pure silence
         rec.prepareToRecord()
         guard rec.record() else {
             throw NSError(domain: "Recorder", code: 1,
@@ -50,6 +51,15 @@ final class Recorder: NSObject, AVAudioRecorderDelegate {
 
     /// Seconds recorded so far (0 when idle).
     var currentTime: TimeInterval { recorder?.currentTime ?? 0 }
+
+    /// Most recent peak input level in dBFS (≈ -160 = digital silence, 0 = max).
+    /// A muted or disconnected mic records pure silence and sits near the floor,
+    /// which lets the app notice nothing is being captured. Returns -160 when idle.
+    func peakLevel() -> Float {
+        guard let rec = recorder else { return -160 }
+        rec.updateMeters()
+        return rec.peakPower(forChannel: 0)
+    }
 
     // MARK: AVAudioRecorderDelegate
 

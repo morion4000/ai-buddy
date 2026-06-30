@@ -31,6 +31,19 @@ enum Sound {
         s?.play()
     }
     static func stop()  { NSSound(named: "Pop")?.play() }
+    /// Error cue: a loud, repeated "Sosumi" alert — deliberately unlike the single
+    /// soft start/stop cues so a failure is unmistakable, even while looking away
+    /// mid-dictation. Played twice so it reads clearly as "something went wrong".
+    static func error() {
+        playAlert("Sosumi")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { playAlert("Sosumi") }
+    }
+
+    private static func playAlert(_ name: String) {
+        let s = NSSound(named: name)
+        s?.volume = 1.0
+        s?.play()
+    }
 }
 
 /// Mutes the system's default audio output while recording, then puts it back
