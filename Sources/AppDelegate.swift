@@ -25,8 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var engineRetry: Timer?
     private var recordTimer: Timer?
     private var silenceTimer: Timer?
-    private var iconAnimTimer: Timer?
-    private var iconAnimPhase = 0
+    /// Native indeterminate spinner shown in the menu bar while transcribing.
+    private var progressSpinner: NSProgressIndicator!
 
     private let minimumDuration: TimeInterval = 0.3
 
@@ -82,6 +82,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = micImage("mic")
             button.toolTip = "AI Buddy"
             button.setAccessibilityLabel("AI Buddy")
+
+            // The spinner is a real view (not a template image), so it draws its own
+            // appearance-adaptive spokes — light on a dark menu bar, dark on a light
+            // one — with no tinting help. Centered in the button and hidden until it's
+            // animating (isDisplayedWhenStopped = false).
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isIndeterminate = true
+            spinner.isDisplayedWhenStopped = false
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            button.addSubview(spinner)
+            NSLayoutConstraint.activate([
+                spinner.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+                spinner.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                spinner.widthAnchor.constraint(equalToConstant: 16),
+                spinner.heightAnchor.constraint(equalToConstant: 16),
+            ])
+            progressSpinner = spinner
         }
         rebuildMenu()
     }
@@ -552,7 +571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem.button {
             switch state.status {
             case .recording:
-                stopIconAnimation()
+                hideSpinner()
                 // Force the button into dark appearance so the explicitly-white timer
                 // text isn't remapped to black by the menu bar's vibrancy, and pair it
                 // with a baked-white (non-template) mic glyph so both read white.
@@ -560,14 +579,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 button.image = micImage("mic.fill", tint: .white)
                 button.contentTintColor = nil
             case .transcribing:
-                // Animate the waveform while we wait on Gemini, so the menu bar
-                // shows the app is busy rather than a frozen glyph.
-                button.appearance = nil
-                button.contentTintColor = nil
-                button.title = ""
-                startIconAnimation()
+                // Run the native spinner while we wait on Gemini, so the menu bar reads
+                // as busy rather than a frozen glyph.
+                showSpinner()
             default:
-                stopIconAnimation()
+                hideSpinner()
                 button.appearance = nil
                 button.image = micImage("mic")
                 button.contentTintColor = nil
@@ -577,33 +593,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    // MARK: Transcribing icon animation
+    // MARK: Transcribing spinner
 
-    private func startIconAnimation() {
-        stopIconAnimation()
-        iconAnimPhase = 0
-        animateIconFrame()
-        iconAnimTimer = Timer.scheduledTimer(withTimeInterval: 0.16, repeats: true) { [weak self] _ in
-            self?.animateIconFrame()
-        }
-    }
-
-    private func stopIconAnimation() {
-        iconAnimTimer?.invalidate()
-        iconAnimTimer = nil
-    }
-
-    private func animateIconFrame() {
+    /// Hide the glyph and run the native spinner. A fixed status width gives the
+    /// centered spinner room to draw — variableLength would collapse to nothing once
+    /// the image and title are cleared.
+    private func showSpinner() {
         guard let button = statusItem.button else { return }
-        // Sweep the waveform's variable value up and back down so the bars pulse.
-        let levels: [Double] = [0.0, 0.33, 0.66, 1.0, 0.66, 0.33]
-        let value = levels[iconAnimPhase % levels.count]
-        iconAnimPhase += 1
-        let image = NSImage(systemSymbolName: "waveform",
-                            variableValue: value,
-                            accessibilityDescription: "Transcribing")
-        image?.isTemplate = true
-        button.image = image
+        button.appearance = nil
+        button.contentTintColor = nil
+        button.image = nil
+        button.title = ""
+        statusItem.length = 28
+        progressSpinner.startAnimation(nil)
+    }
+
+    /// Stop the spinner (auto-hides via isDisplayedWhenStopped) and let the button
+    /// resize to its glyph again.
+    private func hideSpinner() {
+        progressSpinner.stopAnimation(nil)
+        statusItem.length = NSStatusItem.variableLength
     }
 
     // MARK: Actions
@@ -640,9 +649,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let hosting = NSHostingController(rootView: SettingsView(state: state))
             let window = NSWindow(contentViewController: hosting)
             window.title = "AI Buddy"
-            window.styleMask = [.titled, .closable, .miniaturizable]
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.isReleasedWhenClosed = false
-            window.setContentSize(NSSize(width: 500, height: 720))
+            window.setContentSize(NSSize(width: 740, height: 600))
+            window.contentMinSize = NSSize(width: 660, height: 480)
             window.center()
             settingsWindow = window
         }
@@ -652,7 +662,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Modal About panel: app identity, version, and a button out to the website.
     @objc private func showAbout() {
-        let website = "claude.co/ai-buddy"
+        let website = "claudete.co/ai-buddy"
         let websiteURL = URL(string: "https://\(website)")
 
         let info = Bundle.main.infoDictionary
