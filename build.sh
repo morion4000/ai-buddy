@@ -33,6 +33,7 @@ xcrun --sdk macosx swiftc \
 
 echo "▸ Assembling bundle…"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/AppIcon.icns" "$RES/AppIcon.icns"
 
 echo "▸ Signing…"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"

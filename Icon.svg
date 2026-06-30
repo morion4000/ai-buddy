@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="AI Buddy">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2BD4A7"/>
+      <stop offset="1" stop-color="#1FA2E8"/>
+    </linearGradient>
+    <radialGradient id="glow2" cx="512" cy="320" r="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="230" ry="230" fill="url(#bg2)"/>
+  <rect width="1024" height="1024" rx="230" ry="230" fill="url(#glow2)"/>
+
+  <!-- sound waves flanking the mic -->
+  <g fill="none" stroke="#ffffff" stroke-linecap="round">
+    <g stroke-width="30" stroke-opacity="0.9">
+      <path d="M676 432 Q716 512 676 592"/>
+      <path d="M348 432 Q308 512 348 592"/>
+    </g>
+    <g stroke-width="26" stroke-opacity="0.45">
+      <path d="M744 396 Q804 512 744 628"/>
+      <path d="M280 396 Q220 512 280 628"/>
+    </g>
+  </g>
+
+  <!-- microphone bracket -->
+  <g fill="none" stroke="#ffffff" stroke-width="40" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M392 432 Q512 720 632 432"/>
+    <line x1="512" y1="592" x2="512" y2="700"/>
+    <line x1="446" y1="700" x2="578" y2="700"/>
+  </g>
+
+  <!-- microphone head -->
+  <rect x="422" y="268" width="180" height="248" rx="90" ry="90" fill="#ffffff"/>
+</svg>
