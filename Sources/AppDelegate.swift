@@ -118,6 +118,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(startMI)
         }
 
+        let shotMI = NSMenuItem(title: "Take Screenshot", action: #selector(takeScreenshot), keyEquivalent: "")
+        shotMI.target = self
+        menu.addItem(shotMI)
+
         let recentsMI = NSMenuItem(title: "Recent Transcriptions", action: nil, keyEquivalent: "")
         let sub = NSMenu()
         if state.recents.isEmpty {
@@ -178,8 +182,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = shotEngine.start()
     }
 
+    /// Hotkey path — only fires when the screenshot shortcut is enabled.
     private func triggerScreenshot() {
         guard state.screenshotsEnabled else { return }
+        captureScreenshot()
+    }
+
+    /// Menu path — an explicit click, so it always works regardless of the hotkey toggle.
+    @objc private func takeScreenshot() { captureScreenshot() }
+
+    /// Shared capture: prompt for Screen Recording if missing, otherwise start an
+    /// interactive selection grab.
+    private func captureScreenshot() {
         guard Permissions.hasScreenRecording() else {
             Permissions.requestScreenRecording()
             Permissions.openScreenRecordingSettings()
