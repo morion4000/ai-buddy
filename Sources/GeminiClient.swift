@@ -61,7 +61,8 @@ enum GeminiClient {
     static func transcribe(audioURL: URL,
                            apiKey: String,
                            model: String,
-                           instruction: String) async throws -> TranscriptionResult {
+                           instruction: String,
+                           thinkingBudget: Int) async throws -> TranscriptionResult {
         // Keys pasted from a webpage often carry a trailing newline/space, which
         // otherwise fails auth with a confusing 400. Trim before use.
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -74,30 +75,154 @@ enum GeminiClient {
         let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(modelID):generateContent"
         guard let url = URL(string: endpoint) else { throw GeminiError.badResponse }
 
-        let body: [String: Any] = [
-            "contents": [[
-                "parts": [
-                    ["text": instruction],
-                    ["inline_data": ["mime_type": "audio/wav", "data": base64]],
-                ]
-            ]],
-            "generationConfig": ["temperature": 0],
-        ]
+        func makeBody(thinking: Bool) throws -> Data {
+            var gen = generationConfig(thinkingBudget: thinkingBudget)
+            if !thinking { gen.removeValue(forKey: "thinkingConfig") }
+            let body: [String: Any] = [
+                "contents": [[
+                    "parts": [
+                        ["text": instruction],
+                        ["inline_data": ["mime_type": "audio/wav", "data": base64]],
+                    ]
+                ]],
+                "generationConfig": gen,
+            ]
+            return try JSONSerialization.data(withJSONObject: body)
+        }
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 30
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        req.httpBody = try makeBody(thinking: true)
 
-        let data = try await send(req, retries: 2)
+        let data: Data
+        do {
+            data = try await send(req, retries: 2)
+        } catch let GeminiError.http(code, msg) where code == 400 && isThinkingError(msg) {
+            // A model that rejects our thinking hint — retry once with its defaults.
+            req.httpBody = try makeBody(thinking: false)
+            data = try await send(req, retries: 2)
+        }
 
         guard let text = extractText(from: data) else { throw GeminiError.empty }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { throw GeminiError.empty }
         let usage = extractUsage(from: data)
         return TranscriptionResult(text: trimmed, inputTokens: usage.input, outputTokens: usage.output)
+    }
+
+    /// Streaming transcription over `streamGenerateContent` (SSE). Calls `onDelta`
+    /// with whitespace-safe text pieces as they arrive — deltas never carry the
+    /// output's leading or a dangling trailing whitespace, so a caller can type
+    /// them straight to the cursor without a stray space or an accidental newline
+    /// (which could submit a chat field). Returns the full result at the end.
+    static func transcribeStreaming(audioURL: URL,
+                                    apiKey: String,
+                                    model: String,
+                                    instruction: String,
+                                    thinkingBudget: Int,
+                                    onDelta: @escaping (String) -> Void) async throws -> TranscriptionResult {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw GeminiError.noKey }
+
+        let audio = try Data(contentsOf: audioURL)
+        let base64 = audio.base64EncodedString()
+        let modelID = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(modelID):streamGenerateContent?alt=sse"
+        guard let url = URL(string: endpoint) else { throw GeminiError.badResponse }
+
+        func makeBody(thinking: Bool) throws -> Data {
+            var gen = generationConfig(thinkingBudget: thinkingBudget)
+            if !thinking { gen.removeValue(forKey: "thinkingConfig") }
+            let body: [String: Any] = [
+                "contents": [[
+                    "parts": [
+                        ["text": instruction],
+                        ["inline_data": ["mime_type": "audio/wav", "data": base64]],
+                    ]
+                ]],
+                "generationConfig": gen,
+            ]
+            return try JSONSerialization.data(withJSONObject: body)
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 60
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+
+        func attempt(thinking: Bool) async throws -> TranscriptionResult {
+            req.httpBody = try makeBody(thinking: thinking)
+            let (bytes, response) = try await URLSession.shared.bytes(for: req)
+            guard let http = response as? HTTPURLResponse else { throw GeminiError.badResponse }
+            guard (200..<300).contains(http.statusCode) else {
+                var data = Data()
+                for try await b in bytes { data.append(b) }
+                let msg = errorMessage(from: data) ?? (String(data: data, encoding: .utf8) ?? "")
+                throw GeminiError.http(http.statusCode, msg)
+            }
+
+            var full = ""
+            var input = 0, output = 0
+            var trailing = ""     // whitespace held back so we never emit a trailing newline
+            var started = false   // drop the whole output's leading whitespace
+            for try await line in bytes.lines {
+                guard line.hasPrefix("data:") else { continue }
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                guard !payload.isEmpty, payload != "[DONE]",
+                      let d = payload.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
+                if let usage = obj["usageMetadata"] as? [String: Any] {
+                    input = usage["promptTokenCount"] as? Int ?? input
+                    output = usage["candidatesTokenCount"] as? Int ?? output
+                }
+                guard let delta = extractTextParts(obj), !delta.isEmpty else { continue }
+                full += delta
+                var piece = trailing + delta
+                if !started {
+                    piece = String(piece.drop(while: { $0.isWhitespace }))
+                    if piece.isEmpty { trailing = ""; continue }
+                    started = true
+                }
+                // Emit up to the last non-whitespace; buffer any trailing whitespace
+                // in case it's mid-text (a space before the next word) or the end.
+                if let lastNonWS = piece.lastIndex(where: { !$0.isWhitespace }) {
+                    let cut = piece.index(after: lastNonWS)
+                    trailing = String(piece[cut...])
+                    onDelta(String(piece[..<cut]))
+                } else {
+                    trailing = piece
+                }
+            }
+            let trimmed = full.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { throw GeminiError.empty }
+            return TranscriptionResult(text: trimmed, inputTokens: input, outputTokens: output)
+        }
+
+        do {
+            return try await attempt(thinking: true)
+        } catch let GeminiError.http(code, msg) where code == 400 && isThinkingError(msg) {
+            return try await attempt(thinking: false)
+        }
+    }
+
+    /// A 0 thinking budget disables reasoning — the single biggest latency win, and
+    /// the default here since verbatim transcription needs none. Works on Flash 2.x
+    /// and 3.x alike (verified against the API); if some model ever rejects the
+    /// budget, the caller retries without any thinking config.
+    private static func generationConfig(thinkingBudget: Int) -> [String: Any] {
+        ["temperature": 0, "thinkingConfig": ["thinkingBudget": thinkingBudget]]
+    }
+
+    /// True when an API error looks like it's complaining about our thinking hint,
+    /// so we can retry without it rather than failing the transcription.
+    private static func isThinkingError(_ message: String) -> Bool {
+        let m = message.lowercased()
+        return m.contains("thinking") || m.contains("thinkinglevel") || m.contains("thinking_level")
+            || m.contains("thinkingbudget") || m.contains("thinking_budget")
     }
 
     /// Lightweight check that the key + model are valid: a GET on the model's
@@ -145,11 +270,18 @@ enum GeminiClient {
     }
 
     private static func extractText(from data: Data) -> String? {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let candidates = obj["candidates"] as? [[String: Any]],
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return extractTextParts(obj)
+    }
+
+    /// Joins the text parts of the first candidate in a parsed response object.
+    private static func extractTextParts(_ obj: [String: Any]) -> String? {
+        guard let candidates = obj["candidates"] as? [[String: Any]],
               let content = candidates.first?["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]] else { return nil }
-        let texts = parts.compactMap { $0["text"] as? String }
+        let texts = parts
+            .filter { ($0["thought"] as? Bool) != true }   // never surface reasoning as output
+            .compactMap { $0["text"] as? String }
         return texts.isEmpty ? nil : texts.joined()
     }
 

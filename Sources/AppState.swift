@@ -62,6 +62,12 @@ final class AppState: ObservableObject {
     /// Languages the speaker dictates in. Transcription is constrained to this set —
     /// English is always included and can't be removed. See `languagesDirective`.
     @Published var languages: [String]     { didSet { d.set(languages, forKey: K.languages) } }
+    /// When on, stream the transcription and type it at the cursor as it arrives
+    /// (feels faster) instead of pasting the whole thing once at the end.
+    @Published var streamText: Bool        { didSet { d.set(streamText, forKey: K.streamText) } }
+    /// Off by default: verbatim transcription needs no reasoning and thinking only
+    /// adds latency. When on, we allow a small budget (see `thinkingBudget`).
+    @Published var enableThinking: Bool    { didSet { d.set(enableThinking, forKey: K.enableThinking) } }
 
     // MARK: Screenshots
     @Published var screenshotsEnabled: Bool { didSet { d.set(screenshotsEnabled, forKey: K.shotEnabled); onScreenshotHotkeyChange?() } }
@@ -92,7 +98,9 @@ final class AppState: ObservableObject {
         static let vocabulary = "vocabulary"
         static let recents = "recents", configured = "configured", maxRecording = "maxRecordingSeconds"
         static let removeFillers = "removeFillers", muteWhileRecording = "muteWhileRecording"
-        static let languages = "languages"
+        static let languages = "languages", streamText = "streamText"
+        static let enableThinking = "enableThinking"
+        static let modelMigrated35 = "modelDefault35Migrated"
         static let shotEnabled = "screenshotsEnabled", shotKey = "screenshotKeyCode", shotMods = "screenshotMods"
         static let usageCount = "usageCount", usageInput = "usageInputTokens", usageOutput = "usageOutputTokens"
         static let usageCost = "usageCost"
@@ -168,6 +176,11 @@ final class AppState: ObservableObject {
         """
     }
 
+    /// Thinking tokens allowed per transcription: 0 (off) by default, or a small
+    /// budget when the user opts in — kept low so it barely costs latency.
+    static let smallThinkingBudget = 512
+    var thinkingBudget: Int { enableThinking ? AppState.smallThinkingBudget : 0 }
+
     /// The transcription prompt actually sent to Gemini, with opt-in add-ons applied.
     var effectiveInstruction: String {
         var prompt = instruction
@@ -180,7 +193,7 @@ final class AppState: ObservableObject {
 
     init() {
         apiKey      = Keychain.get() ?? ""
-        model       = d.string(forKey: K.model) ?? "gemini-2.5-flash"
+        model       = d.string(forKey: K.model) ?? "gemini-3.5-flash"
         triggerMode = TriggerMode(rawValue: d.string(forKey: K.triggerMode) ?? "") ?? .hold
 
         if d.bool(forKey: K.configured) {
@@ -204,6 +217,8 @@ final class AppState: ObservableObject {
         removeFillers       = d.object(forKey: K.removeFillers) as? Bool ?? false
         muteWhileRecording  = d.object(forKey: K.muteWhileRecording) as? Bool ?? true
         languages           = AppState.effectiveLanguages(d.stringArray(forKey: K.languages) ?? [])
+        streamText          = d.object(forKey: K.streamText) as? Bool ?? true
+        enableThinking      = d.object(forKey: K.enableThinking) as? Bool ?? false
 
         screenshotsEnabled  = d.object(forKey: K.shotEnabled) as? Bool ?? true
         // Default trigger: a clean tap of Right ⌘ (keyCode 54), no extra modifiers.
@@ -218,6 +233,14 @@ final class AppState: ObservableObject {
         if let data = d.data(forKey: K.recents),
            let items = try? JSONDecoder().decode([TranscriptItem].self, from: data) {
             recents = items
+        }
+
+        // One-time bump: anyone still on the previous default (gemini-2.5-flash) moves
+        // to the newer, faster gemini-3.5-flash. A deliberate other choice is untouched.
+        if !d.bool(forKey: K.modelMigrated35) {
+            if model == "gemini-2.5-flash" { model = "gemini-3.5-flash" }
+            d.set(model, forKey: K.model)
+            d.set(true, forKey: K.modelMigrated35)
         }
     }
 

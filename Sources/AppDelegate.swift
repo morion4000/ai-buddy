@@ -333,7 +333,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let apiKey = state.apiKey
         let model = state.model
         let instruction = state.effectiveInstruction
+        let thinkingBudget = state.thinkingBudget
         let url = result.url
+        // Stream + type-live only when we'd actually inject at the cursor and can
+        // (Accessibility granted). Otherwise use the plain one-shot request.
+        let stream = state.streamText && state.insertAtCursor && Permissions.hasAccessibility()
 
         transcribeGeneration += 1
         let gen = transcribeGeneration
@@ -341,8 +345,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcribeTask = Task {
             let outcome: Result<TranscriptionResult, Error>
             do {
-                let result = try await GeminiClient.transcribe(
-                    audioURL: url, apiKey: apiKey, model: model, instruction: instruction)
+                let result: TranscriptionResult
+                if stream {
+                    // Deltas arrive in order and are whitespace-safe; type each one as
+                    // it lands. Cancelling the task ends the stream, which stops typing.
+                    result = try await GeminiClient.transcribeStreaming(
+                        audioURL: url, apiKey: apiKey, model: model, instruction: instruction,
+                        thinkingBudget: thinkingBudget,
+                        onDelta: { TextInjector.typeUnicode($0) })
+                } else {
+                    result = try await GeminiClient.transcribe(
+                        audioURL: url, apiKey: apiKey, model: model, instruction: instruction,
+                        thinkingBudget: thinkingBudget)
+                }
                 outcome = .success(result)
             } catch {
                 outcome = .failure(error)
@@ -354,7 +369,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 switch outcome {
                 case .success(let result):
                     self.state.recordUsage(input: result.inputTokens, output: result.outputTokens, model: model)
-                    self.handleTranscription(result.text)
+                    if stream { self.handleStreamedTranscription(result.text) }
+                    else      { self.handleTranscription(result.text) }
                 case .failure(let error):
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.handleError(message)
@@ -543,6 +559,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        state.status = .idle
+        refreshUI()
+    }
+
+    /// Finalizes a streamed transcription. The text was already typed at the cursor
+    /// as it streamed, so this only records it and refreshes the clipboard.
+    private func handleStreamedTranscription(_ text: String) {
+        stopTranscribeWatchdog()
+        state.addRecent(text)
+        if state.copyToClipboard {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
         state.status = .idle
         refreshUI()
     }

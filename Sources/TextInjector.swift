@@ -67,21 +67,14 @@ enum TextInjector {
 
     // MARK: Type (fallback)
 
+    /// Serial so streamed deltas type out in the order they were requested (each
+    /// `typeUnicode` call just enqueues; the queue drains one chunk at a time).
+    private static let typeQueue = DispatchQueue(label: "com.morion4000.aibuddy.typing")
+
     static func typeUnicode(_ text: String) {
         let src = CGEventSource(stateID: .combinedSessionState)
-
-        // Chunk into <= 20 UTF-16 code units per event (a hard CGEvent limit),
-        // never splitting a grapheme/surrogate pair.
-        var chunks: [[UniChar]] = []
-        var current: [UniChar] = []
-        for ch in text {
-            let units = Array(String(ch).utf16)
-            if current.count + units.count > 20 { chunks.append(current); current = [] }
-            current.append(contentsOf: units)
-        }
-        if !current.isEmpty { chunks.append(current) }
-
-        DispatchQueue.global(qos: .userInitiated).async {
+        let chunks = utf16Chunks(text)
+        typeQueue.async {
             for var chunk in chunks {
                 let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true)
                 down?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
@@ -92,5 +85,19 @@ enum TextInjector {
                 usleep(5_000) // ~5ms between chunks so no characters drop
             }
         }
+    }
+
+    /// Splits text into <= 20 UTF-16 code units per event (a hard CGEvent limit),
+    /// never splitting a grapheme/surrogate pair.
+    private static func utf16Chunks(_ text: String) -> [[UniChar]] {
+        var chunks: [[UniChar]] = []
+        var current: [UniChar] = []
+        for ch in text {
+            let units = Array(String(ch).utf16)
+            if current.count + units.count > 20 { chunks.append(current); current = [] }
+            current.append(contentsOf: units)
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
     }
 }

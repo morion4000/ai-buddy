@@ -40,8 +40,8 @@ struct SettingsView: View {
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     private let modelPresets = [
-        "gemini-2.5-flash",
         "gemini-3.5-flash",
+        "gemini-2.5-flash",
         "gemini-3-flash-preview",
         "gemini-3.1-flash-lite",
         "gemini-2.5-flash-lite",
@@ -156,7 +156,12 @@ struct SettingsView: View {
                     }
                     .frame(width: 100)
                 }
-                Text("Any audio-capable Gemini model works. Newest stable Flash is gemini-3.5-flash; gemini-2.5-flash is a safe default.")
+                Text("Any audio-capable Gemini model works. gemini-3.5-flash is the default; gemini-2.5-flash-lite is faster and cheaper for simple dictation.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle("Enable thinking", isOn: $state.enableThinking)
+                Text("Off by default and recommended off — transcription needs no reasoning, so thinking mostly just adds delay. When on, only a small thinking budget is used.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             HStack(spacing: 8) {
@@ -217,6 +222,11 @@ struct SettingsView: View {
             Toggle("Copy text to the clipboard", isOn: $state.copyToClipboard)
             Toggle("Type characters instead of pasting (fallback for apps that block paste)",
                    isOn: $state.typeInsteadOfPaste)
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle("Stream text live (type as it's transcribed)", isOn: $state.streamText)
+                Text("Types words at the cursor as they arrive instead of pasting all at once, so text starts landing sooner. Turn off for a single paste at the end — more reliable in apps that dislike synthetic typing.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Toggle("Clean up filler words (um, uh, er…)", isOn: $state.removeFillers)
                 Text("Asks Gemini to drop “um”, “uh”, false starts, and stutters for cleaner text.")
