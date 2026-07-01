@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// Captures an interactive screen-region selection (via the system
 /// `screencapture -i` UI) and shows each shot as a draggable thumbnail floating
@@ -139,11 +140,66 @@ final class ThumbnailView: NSView, NSDraggingSource {
         close.autoresizingMask = [.minXMargin, .minYMargin]
         addSubview(close)
 
-        toolTip = "Drag me into any app · click to copy · ✕ to dismiss"
+        toolTip = "Drag into any app · click to copy · double-click to open · right-click for more · ✕ to dismiss"
     }
     required init?(coder: NSCoder) { nil }
 
     @objc private func closeTapped() { onClose?(self) }
+
+    // MARK: Actions (shared by clicks and the right-click menu)
+
+    @objc private func copyToClipboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([image])
+    }
+
+    /// Opens the PNG in Preview specifically (falling back to the default handler).
+    @objc private func openInPreview() {
+        let config = NSWorkspace.OpenConfiguration()
+        if let preview = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Preview") {
+            NSWorkspace.shared.open([url], withApplicationAt: preview, configuration: config)
+        } else {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func showInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// Saves a copy somewhere permanent — the capture itself lives in a temp dir
+    /// that's cleaned up when the thumbnail is dismissed.
+    @objc private func saveAs() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = url.lastPathComponent
+        NSApp.activate(ignoringOtherApps: true) // agent app: bring the panel forward
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        try? FileManager.default.removeItem(at: dest) // the panel already confirmed overwrite
+        try? FileManager.default.copyItem(at: url, to: dest)
+    }
+
+    @objc private func dismiss() { onClose?(self) }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        let items: [(String, Selector)] = [
+            ("Open in Preview", #selector(openInPreview)),
+            ("Copy Image",      #selector(copyToClipboard)),
+            ("Save As…",        #selector(saveAs)),
+            ("Show in Finder",  #selector(showInFinder)),
+        ]
+        for (title, action) in items {
+            let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            mi.target = self
+            menu.addItem(mi)
+        }
+        menu.addItem(.separator())
+        let dismissMI = NSMenuItem(title: "Dismiss", action: #selector(dismiss), keyEquivalent: "")
+        dismissMI.target = self
+        menu.addItem(dismissMI)
+        return menu
+    }
 
     override func mouseDown(with event: NSEvent) {
         mouseDownPoint = event.locationInWindow
@@ -163,8 +219,16 @@ final class ThumbnailView: NSView, NSDraggingSource {
 
     override func mouseUp(with event: NSEvent) {
         guard !dragging else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([image]) // click = copy to clipboard
+        if event.clickCount >= 2 {
+            // Double-click opens Preview; cancel the pending single-click copy so a
+            // double-click doesn't also stomp the clipboard.
+            NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(copyToClipboard), object: nil)
+            openInPreview()
+        } else {
+            // Defer the copy one double-click interval: if a second click lands it
+            // becomes an open-in-Preview instead.
+            perform(#selector(copyToClipboard), with: nil, afterDelay: NSEvent.doubleClickInterval)
+        }
     }
 
     func draggingSession(_ session: NSDraggingSession,
