@@ -66,9 +66,10 @@ final class ShotPanel: NSPanel {
     }
 
     private func remove(_ thumb: ThumbnailView) {
+        // Only take it off the screen — leave the PNG on disk so a dismissed shot
+        // (or one already dragged out) isn't destroyed.
         thumb.removeFromSuperview()
         thumbs.removeAll { $0 === thumb }
-        try? FileManager.default.removeItem(at: thumb.url)
         if thumbs.isEmpty { orderOut(nil) } else { relayout() }
     }
 
@@ -120,8 +121,8 @@ final class ThumbnailView: NSView, NSDraggingSource {
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         wantsLayer = true
         layer?.cornerRadius = 6
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.borderWidth = 2
+        layer?.borderColor = NSColor.white.cgColor
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         layer?.masksToBounds = true
 
