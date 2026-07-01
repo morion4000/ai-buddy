@@ -59,6 +59,9 @@ final class AppState: ObservableObject {
     @Published var removeFillers: Bool      { didSet { d.set(removeFillers, forKey: K.removeFillers) } }
     /// When on, mute the system audio output during recording and restore it after.
     @Published var muteWhileRecording: Bool { didSet { d.set(muteWhileRecording, forKey: K.muteWhileRecording) } }
+    /// Languages the speaker dictates in. Transcription is constrained to this set —
+    /// English is always included and can't be removed. See `languagesDirective`.
+    @Published var languages: [String]     { didSet { d.set(languages, forKey: K.languages) } }
 
     // MARK: Screenshots
     @Published var screenshotsEnabled: Bool { didSet { d.set(screenshotsEnabled, forKey: K.shotEnabled); onScreenshotHotkeyChange?() } }
@@ -89,6 +92,7 @@ final class AppState: ObservableObject {
         static let vocabulary = "vocabulary"
         static let recents = "recents", configured = "configured", maxRecording = "maxRecordingSeconds"
         static let removeFillers = "removeFillers", muteWhileRecording = "muteWhileRecording"
+        static let languages = "languages"
         static let shotEnabled = "screenshotsEnabled", shotKey = "screenshotKeyCode", shotMods = "screenshotMods"
         static let usageCount = "usageCount", usageInput = "usageInputTokens", usageOutput = "usageOutputTokens"
         static let usageCost = "usageCost"
@@ -133,12 +137,44 @@ final class AppState: ObservableObject {
             .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
     }
 
+    /// The languages the user can pick from. English leads and is always selected.
+    static let supportedLanguages = [
+        "English", "Spanish", "French", "German", "Italian", "Portuguese",
+        "Dutch", "Romanian", "Polish", "Russian", "Ukrainian", "Turkish",
+        "Greek", "Czech", "Hungarian", "Swedish", "Norwegian", "Danish",
+        "Finnish", "Arabic", "Hebrew", "Hindi", "Japanese", "Korean",
+        "Chinese", "Vietnamese", "Thai", "Indonesian",
+    ]
+
+    /// The stored selection, normalized so English is always present and first.
+    static func effectiveLanguages(_ raw: [String]) -> [String] {
+        var result = ["English"]
+        for l in raw where l != "English" { result.append(l) }
+        return result
+    }
+
+    /// Constrains Gemini to the chosen languages so the output never drifts into an
+    /// unwanted one. Always present (English at minimum), so it's part of every prompt.
+    var languagesDirective: String {
+        let langs = AppState.effectiveLanguages(languages)
+        let list = langs.joined(separator: ", ")
+        if langs.count == 1 {
+            return "The audio is spoken in \(list). Transcribe it in \(list) and do not output text in any other language."
+        }
+        return """
+        The audio is spoken in one or more of these languages: \(list). Transcribe each part in the \
+        same language it is actually spoken in, chosen only from this list. Do not translate between \
+        languages, and do not output text in any language outside this list.
+        """
+    }
+
     /// The transcription prompt actually sent to Gemini, with opt-in add-ons applied.
     var effectiveInstruction: String {
         var prompt = instruction
         if removeFillers { prompt += "\n\n" + AppState.fillerDirective }
         let vocab = vocabularyDirective
         if !vocab.isEmpty { prompt += "\n\n" + vocab }
+        prompt += "\n\n" + languagesDirective
         return prompt
     }
 
@@ -167,6 +203,7 @@ final class AppState: ObservableObject {
         maxRecordingSeconds = d.object(forKey: K.maxRecording) as? Int ?? 60
         removeFillers       = d.object(forKey: K.removeFillers) as? Bool ?? false
         muteWhileRecording  = d.object(forKey: K.muteWhileRecording) as? Bool ?? true
+        languages           = AppState.effectiveLanguages(d.stringArray(forKey: K.languages) ?? [])
 
         screenshotsEnabled  = d.object(forKey: K.shotEnabled) as? Bool ?? true
         // Default trigger: a clean tap of Right ⌘ (keyCode 54), no extra modifiers.

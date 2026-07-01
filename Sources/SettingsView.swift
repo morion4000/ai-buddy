@@ -228,7 +228,41 @@ struct SettingsView: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Toggle("Play a sound when recording starts and stops", isOn: $state.playSounds)
+
+            Divider().padding(.vertical, 2)
+            languagesSection
         }
+    }
+
+    /// Multi-select of the languages the speaker dictates in. English is always on.
+    private var languagesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Spoken languages").font(.subheadline.weight(.medium))
+            Text("Limits transcription to the languages you pick, so the output never drifts into an unwanted one. English is always on — add any others you dictate in.")
+                .font(.caption2).foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), alignment: .leading)],
+                      alignment: .leading, spacing: 6) {
+                ForEach(AppState.supportedLanguages, id: \.self) { lang in
+                    Toggle(lang, isOn: languageBinding(lang))
+                        .toggleStyle(.checkbox)
+                        .disabled(lang == "English")
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    /// On/off binding for one language, backed by the persisted `languages` array.
+    private func languageBinding(_ lang: String) -> Binding<Bool> {
+        Binding(
+            get: { state.languages.contains(lang) },
+            set: { on in
+                if on {
+                    if !state.languages.contains(lang) { state.languages.append(lang) }
+                } else {
+                    state.languages.removeAll { $0 == lang }
+                }
+            })
     }
 
     // MARK: Screenshots
