@@ -235,4 +235,13 @@ final class ThumbnailView: NSView, NSDraggingSource {
                          sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
         .copy
     }
+
+    func draggingSession(_ session: NSDraggingSession,
+                         endedAt screenPoint: NSPoint,
+                         operation: NSDragOperation) {
+        dragging = false
+        // The shot landed somewhere (any accepted operation) — dismiss it. A drag
+        // cancelled onto nothing reports an empty operation, so the thumbnail stays.
+        if operation != [] { onClose?(self) }
+    }
 }
