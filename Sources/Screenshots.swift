@@ -132,10 +132,27 @@ final class ThumbnailView: NSView, NSDraggingSource {
         iv.autoresizingMask = [.width, .height]
         addSubview(iv)
 
-        let close = NSButton(frame: NSRect(x: width - 20, y: height - 20, width: 18, height: 18))
-        close.bezelStyle = .circular
-        close.title = "✕"
-        close.font = .systemFont(ofSize: 9)
+        // A big, high-contrast dismiss button: a red disc with a bold white ✕ and a
+        // white ring, so it reads clearly over any screenshot.
+        let closeSize: CGFloat = 28
+        let inset: CGFloat = 6
+        let close = NSButton(frame: NSRect(x: width - closeSize - inset,
+                                           y: height - closeSize - inset,
+                                           width: closeSize, height: closeSize))
+        close.isBordered = false
+        close.wantsLayer = true
+        close.layer?.backgroundColor = NSColor.systemRed.cgColor
+        close.layer?.cornerRadius = closeSize / 2
+        close.layer?.borderColor = NSColor.white.cgColor
+        close.layer?.borderWidth = 2
+        close.layer?.shadowColor = NSColor.black.cgColor
+        close.layer?.shadowOpacity = 0.35
+        close.layer?.shadowRadius = 2
+        close.layer?.shadowOffset = CGSize(width: 0, height: -1)
+        close.attributedTitle = NSAttributedString(string: "✕", attributes: [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: 16, weight: .heavy),
+        ])
         close.target = self
         close.action = #selector(closeTapped)
         close.autoresizingMask = [.minXMargin, .minYMargin]
