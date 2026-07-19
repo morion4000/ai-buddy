@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recorder.onUnexpectedStop = { [weak self] in self?.handleRecorderFailure() }
 
         state.onScreenshotHotkeyChange = { [weak self] in self?.applyScreenshotHotkeyConfig() }
+        state.onRecentsChange = { [weak self] in self?.rebuildMenu() }
         shotEngine.onStart = { [weak self] in self?.triggerScreenshot() }
 
         // Ask for the mic up front so the first dictation isn't blocked.

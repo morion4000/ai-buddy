@@ -37,6 +37,7 @@ struct SettingsView: View {
     @State private var tick = 0
     @State private var testing = false
     @State private var testResult: (ok: Bool, message: String)?
+    @State private var showingClearHistoryConfirmation = false
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     private let modelPresets = [
@@ -414,6 +415,44 @@ struct SettingsView: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
 
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Conversation keywords").font(.subheadline.weight(.medium))
+                    Spacer()
+                    Toggle("Use for transcription", isOn: $state.useConversationKeywords)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                }
+
+                Group {
+                    if state.conversationKeywords.isEmpty {
+                        Text("Keywords will appear after you save some transcriptions.")
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Text(state.conversationKeywords.joined(separator: ", "))
+                            .textSelection(.enabled)
+                    }
+                }
+                .font(.callout)
+                .frame(maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
+                .padding(7)
+                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+
+                Text("Extracted locally from your saved transcription history and used only as soft context. Unlike the custom dictionary, keywords do not force an exact spelling.")
+                    .font(.caption2).foregroundStyle(.secondary)
+
+                HStack {
+                    Text("\(state.recents.count.formatted()) of \(AppState.maxSavedTranscriptions.formatted()) transcriptions saved locally")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear saved transcriptions…", role: .destructive) {
+                        showingClearHistoryConfirmation = true
+                    }
+                    .font(.caption)
+                    .disabled(state.recents.isEmpty)
+                }
+            }
+
             VStack(alignment: .leading, spacing: 4) {
                 Text("Transcription instruction").font(.subheadline.weight(.medium))
                 TextEditor(text: $state.instruction)
@@ -423,6 +462,12 @@ struct SettingsView: View {
                 Button("Reset to default") { state.instruction = AppState.defaultInstruction }
                     .font(.caption)
             }
+        }
+        .alert("Clear saved transcriptions?", isPresented: $showingClearHistoryConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) { state.clearRecents() }
+        } message: {
+            Text("This removes all locally saved transcription history and its conversation keywords. Your custom dictionary will not be changed.")
         }
     }
 

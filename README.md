@@ -12,7 +12,8 @@ wherever your cursor is and copies it to your clipboard.
 - ⏯️ **Pauses whatever's playing** (YouTube, Spotify, Music…) while you record, then resumes it.
 - 📸 **Region screenshots** — a second hotkey draws a capture area; shots float on the right edge as draggable thumbnails (drag into any app, click to copy, ✕ to dismiss).
 - 💵 **Usage & cost estimate** — counts real tokens per request and prices them from a built-in per-model table.
-- 📋 **Recent transcriptions** list, launch-at-login, custom transcription prompt.
+- 📋 **Local transcription history** (up to 1,000, with a clear-history control), launch-at-login, custom transcription prompt.
+- 🧩 **Conversation keywords** — locally extracted topics from saved transcriptions provide soft context for future dictation, separately from the exact-spelling custom dictionary.
 
 > Lives only in the menu bar (no Dock icon). ~900 lines of Swift, no
 > dependencies, builds from the command line in a couple of seconds.
@@ -98,6 +99,9 @@ The Settings window opens automatically on first launch. You'll need to:
 - You can also start/stop from the menu-bar icon, and pick any recent
   transcription from the **Recent Transcriptions** submenu to re-insert it at
   the cursor (and copy it).
+- The latest 1,000 transcription texts are saved locally so AI Buddy can extract
+  conversation keywords. Clear them anytime in **Settings ▸ Advanced**; temporary
+  audio files are deleted after each transcription.
 
 The menu-bar icon reflects state: `mic` (idle) → `mic.fill` red + a running
 `m:ss` timer (listening) → `waveform` (transcribing).

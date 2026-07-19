@@ -38,6 +38,7 @@ struct TranscriptItem: Identifiable, Codable {
 /// Single source of truth for settings + runtime state.
 /// All mutations happen on the main thread (the app never touches it elsewhere).
 final class AppState: ObservableObject {
+    static let maxSavedTranscriptions = 1_000
 
     // MARK: Persisted settings
     @Published var apiKey: String           { didSet { Keychain.set(apiKey) } }
@@ -53,6 +54,14 @@ final class AppState: ObservableObject {
     /// Comma-separated terms the speaker uses often (names, jargon, acronyms) that
     /// Gemini should prefer the exact spelling of — see `vocabularyDirective`.
     @Published var vocabulary: String        { didSet { d.set(vocabulary, forKey: K.vocabulary) } }
+    /// Uses locally extracted topics from saved transcripts as soft context. Unlike
+    /// the custom dictionary, these never instruct Gemini to force an exact spelling.
+    @Published var useConversationKeywords: Bool { didSet { d.set(useConversationKeywords, forKey: K.useConversationKeywords) } }
+    /// Cached separately from the transcript history so the UI and prompt do not need
+    /// to re-run linguistic analysis whenever SwiftUI redraws.
+    @Published private(set) var conversationKeywords: [String] = [] {
+        didSet { d.set(conversationKeywords, forKey: K.conversationKeywords) }
+    }
     /// Safety cap: auto-stop a recording after this many seconds (0 = no cap).
     @Published var maxRecordingSeconds: Int { didSet { d.set(maxRecordingSeconds, forKey: K.maxRecording) } }
     /// When on, asks Gemini to strip filler words / disfluencies from the text.
@@ -82,20 +91,30 @@ final class AppState: ObservableObject {
 
     // MARK: Runtime (not persisted)
     @Published var status: AppStatus = .idle
-    @Published var recents: [TranscriptItem] = [] { didSet { saveRecents() } }
+    @Published var recents: [TranscriptItem] = [] {
+        didSet {
+            saveRecents()
+            refreshConversationKeywords()
+            onRecentsChange?()
+        }
+    }
 
     /// Set by the AppDelegate so the hotkey engine re-binds when the shortcut or mode changes.
     var onHotkeyOrModeChange: (() -> Void)?
     /// Set by the AppDelegate so the screenshot hotkey re-binds when it changes.
     var onScreenshotHotkeyChange: (() -> Void)?
+    /// Keeps the native Recent Transcriptions menu synchronized with settings actions.
+    var onRecentsChange: (() -> Void)?
 
     private let d = UserDefaults.standard
+    private var keywordRefreshGeneration = 0
 
     private enum K {
         static let model = "model", triggerMode = "triggerMode", keyCode = "hotkeyKeyCode"
         static let mods = "hotkeyMods", insert = "insertAtCursor", copy = "copyToClipboard"
         static let type = "typeInsteadOfPaste", sounds = "playSounds", instruction = "instruction"
-        static let vocabulary = "vocabulary"
+        static let vocabulary = "vocabulary", useConversationKeywords = "useConversationKeywords"
+        static let conversationKeywords = "conversationKeywords"
         static let recents = "recents", configured = "configured", maxRecording = "maxRecordingSeconds"
         static let removeFillers = "removeFillers", muteWhileRecording = "muteWhileRecording"
         static let languages = "languages", streamText = "streamText"
@@ -145,6 +164,20 @@ final class AppState: ObservableObject {
             .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
     }
 
+    /// Soft context for resolving ambiguous speech. It must not force missing words or
+    /// exact spellings; those stronger semantics belong only to `vocabularyDirective`.
+    var conversationKeywordsDirective: String {
+        guard useConversationKeywords else { return "" }
+        let dictionaryTerms = Set(AppState.vocabularyTerms(vocabulary).map { $0.lowercased() })
+        let keywords = conversationKeywords.filter { !dictionaryTerms.contains($0.lowercased()) }
+        guard !keywords.isEmpty else { return "" }
+        return """
+        Recent transcriptions have often discussed these topics: \(keywords.joined(separator: ", ")). \
+        Use them only as context when the audio is genuinely ambiguous. Do not add a topic that was not \
+        spoken, and do not treat this list as an exact-spelling dictionary.
+        """
+    }
+
     /// The languages the user can pick from. English leads and is always selected.
     static let supportedLanguages = [
         "English", "Spanish", "French", "German", "Italian", "Portuguese",
@@ -187,6 +220,8 @@ final class AppState: ObservableObject {
         if removeFillers { prompt += "\n\n" + AppState.fillerDirective }
         let vocab = vocabularyDirective
         if !vocab.isEmpty { prompt += "\n\n" + vocab }
+        let keywords = conversationKeywordsDirective
+        if !keywords.isEmpty { prompt += "\n\n" + keywords }
         prompt += "\n\n" + languagesDirective
         return prompt
     }
@@ -213,6 +248,7 @@ final class AppState: ObservableObject {
         playSounds         = d.object(forKey: K.sounds)  as? Bool ?? true
         instruction        = d.string(forKey: K.instruction) ?? AppState.defaultInstruction
         vocabulary         = d.string(forKey: K.vocabulary) ?? ""
+        useConversationKeywords = d.object(forKey: K.useConversationKeywords) as? Bool ?? true
         maxRecordingSeconds = d.object(forKey: K.maxRecording) as? Int ?? 60
         removeFillers       = d.object(forKey: K.removeFillers) as? Bool ?? false
         muteWhileRecording  = d.object(forKey: K.muteWhileRecording) as? Bool ?? true
@@ -232,7 +268,13 @@ final class AppState: ObservableObject {
 
         if let data = d.data(forKey: K.recents),
            let items = try? JSONDecoder().decode([TranscriptItem].self, from: data) {
-            recents = items
+            recents = Array(items.prefix(AppState.maxSavedTranscriptions))
+        }
+        if let cached = d.stringArray(forKey: K.conversationKeywords) {
+            conversationKeywords = cached
+        } else {
+            conversationKeywords = KeywordExtractor.extract(from: recents.map(\.text))
+            d.set(conversationKeywords, forKey: K.conversationKeywords)
         }
 
         // One-time bump: anyone still on the previous default (gemini-2.5-flash) moves
@@ -259,11 +301,41 @@ final class AppState: ObservableObject {
     }
 
     func addRecent(_ text: String) {
-        recents.insert(TranscriptItem(text: text, date: Date()), at: 0)
-        if recents.count > 25 { recents = Array(recents.prefix(25)) }
+        var updated = recents
+        updated.insert(TranscriptItem(text: text, date: Date()), at: 0)
+        recents = Array(updated.prefix(AppState.maxSavedTranscriptions))
+    }
+
+    func clearRecents() {
+        recents.removeAll()
+        // `recents`' observer has already synchronized the empty in-memory state;
+        // remove the persisted keys entirely so clear really removes the history/cache.
+        d.removeObject(forKey: K.recents)
+        d.removeObject(forKey: K.conversationKeywords)
     }
 
     private func saveRecents() {
         if let data = try? JSONEncoder().encode(recents) { d.set(data, forKey: K.recents) }
+    }
+
+    private func refreshConversationKeywords() {
+        keywordRefreshGeneration += 1
+        let generation = keywordRefreshGeneration
+        let texts = recents.map(\.text)
+        guard !texts.isEmpty else {
+            conversationKeywords = []
+            return
+        }
+
+        // Linguistic tagging can become noticeable with a full 1,000-item history.
+        // Analyze off the main thread, then ignore stale results if history changed
+        // again while the work was running.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let keywords = KeywordExtractor.extract(from: texts)
+            DispatchQueue.main.async {
+                guard let self, self.keywordRefreshGeneration == generation else { return }
+                self.conversationKeywords = keywords
+            }
+        }
     }
 }
