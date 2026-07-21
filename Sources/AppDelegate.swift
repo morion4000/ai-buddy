@@ -191,10 +191,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateMI.target = self
         menu.addItem(updateMI)
 
-        let githubMI = NSMenuItem(title: "AI Buddy on GitHub", action: #selector(openGitHub), keyEquivalent: "")
-        githubMI.target = self
-        menu.addItem(githubMI)
-
         let quitMI = NSMenuItem(title: "Quit AI Buddy", action: #selector(quit), keyEquivalent: "q")
         quitMI.target = self
         menu.addItem(quitMI)
@@ -704,10 +700,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
-    /// Modal About panel: app identity, version, and a button out to the website.
+    /// Modal About panel: app identity, version, and buttons out to the website
+    /// and the source on GitHub.
     @objc private func showAbout() {
         let website = "claudete.co/ai-buddy"
         let websiteURL = URL(string: "https://\(website)")
+        let github = "github.com/morion4000/ai-buddy"
+        let githubURL = URL(string: "https://\(github)")
 
         let info = Bundle.main.infoDictionary
         let version = info?["CFBundleShortVersionString"] as? String ?? ""
@@ -724,16 +723,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         and Gemini transcribes it straight to your cursor.
 
         \(website)
+        \(github)
         """
         alert.addButton(withTitle: "Visit Website")
+        alert.addButton(withTitle: "GitHub")
         alert.addButton(withTitle: "OK")
-        if alert.runModal() == .alertFirstButtonReturn, let websiteURL {
-            NSWorkspace.shared.open(websiteURL)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:  if let websiteURL { NSWorkspace.shared.open(websiteURL) }
+        case .alertSecondButtonReturn: if let githubURL { NSWorkspace.shared.open(githubURL) }
+        default: break
         }
-    }
-
-    @objc private func openGitHub() {
-        NSWorkspace.shared.open(URL(string: "https://github.com/morion4000/ai-buddy")!)
     }
 
     @objc private func checkForUpdates() {
