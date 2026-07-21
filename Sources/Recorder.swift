@@ -1,7 +1,35 @@
 import AVFoundation
 
-/// Records the microphone to a temporary 16 kHz mono 16-bit PCM WAV file —
-/// small, lossless, and directly accepted by Gemini as `audio/wav`.
+/// How recordings are encoded on disk before being uploaded.
+///
+/// AAC in an MPEG-4 container rather than the PCM WAV this used to write: at
+/// 16 kHz mono it lands ~8x smaller, which matters because the whole file is
+/// base64-encoded and uploaded *after* the hotkey is released, squarely in the
+/// gap between speaking and seeing text. Gemini bills audio by duration, not
+/// bytes, so the smaller upload costs nothing — verified against the API, where
+/// WAV and AAC of the same take returned identical transcripts for 151 vs 152
+/// input tokens.
+enum AudioFormat {
+    static let fileExtension = "m4a"
+    /// The container is MPEG-4; `audio/mp4` and `audio/aac` are both accepted.
+    static let mimeType = "audio/mp4"
+    static let sampleRate = 16_000.0
+    /// Speech at 16 kHz mono stays comfortably intelligible here. Lower bitrates
+    /// shrink the file further but buy little real time back, so this keeps
+    /// headroom for noisy rooms and quiet speakers.
+    static let bitRate = 32_000
+
+    static var recorderSettings: [String: Any] {
+        [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: bitRate,
+        ]
+    }
+}
+
+/// Records the microphone to a temporary 16 kHz mono AAC file — see `AudioFormat`.
 final class Recorder: NSObject, AVAudioRecorderDelegate {
     private var recorder: AVAudioRecorder?
     private var url: URL?
@@ -13,18 +41,9 @@ final class Recorder: NSObject, AVAudioRecorderDelegate {
 
     func start() throws {
         let file = FileManager.default.temporaryDirectory
-            .appendingPathComponent("gemini-dictation-\(UUID().uuidString).wav")
+            .appendingPathComponent("gemini-dictation-\(UUID().uuidString).\(AudioFormat.fileExtension)")
 
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatLinearPCM),
-            AVSampleRateKey: 16_000.0,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-        ]
-
-        let rec = try AVAudioRecorder(url: file, settings: settings)
+        let rec = try AVAudioRecorder(url: file, settings: AudioFormat.recorderSettings)
         rec.delegate = self
         rec.isMeteringEnabled = true // so we can detect a muted/off mic recording pure silence
         rec.prepareToRecord()

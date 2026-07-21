@@ -5,7 +5,7 @@ speak, and Google **Gemini** transcribes your voice to text — then types it
 wherever your cursor is and copies it to your clipboard.
 
 - 🔘 **One global hotkey** — hold-to-talk *or* toggle, you choose. Default: hold **Right ⌥ (Option)**.
-- 🧠 **Gemini speech-to-text** — uses any audio-capable Gemini model (default `gemini-2.5-flash`; one-click presets for `gemini-3.5-flash`, `gemini-3.1-flash-lite`, etc.).
+- 🧠 **Gemini speech-to-text** — uses any audio-capable Gemini model (default `gemini-3.5-flash`; one-click presets for `gemini-3.1-flash-lite`, `gemini-flash-latest`, etc.).
 - ⌨️ **Types at your cursor** in any app, **and** keeps the text on the clipboard.
 - 🔑 **Your own API key**, stored securely in the macOS Keychain.
 - 🧹 **Optional filler-word cleanup** — strip "um", "uh", false starts, and stutters for tidier text.
@@ -143,8 +143,8 @@ Presets**, or type a model id directly:
 
 | Model | Notes |
 |---|---|
-| `gemini-2.5-flash` | **Default.** Fast, cheap, rock-solid for transcription. |
-| `gemini-3.5-flash` | Newest stable Flash — highest quality. |
+| `gemini-3.5-flash` | **Default.** Fast and accurate for transcription. |
+| `gemini-2.5-flash` | Previous default. Closed to new API keys — existing users are migrated off it automatically. |
 | `gemini-3.1-flash-lite` | Cheapest; tuned for ASR / high volume. |
 | `gemini-3-flash-preview` | Preview of the Gemini 3 base Flash. |
 | `gemini-flash-latest` | Alias that tracks the latest Flash release. |
@@ -153,8 +153,11 @@ Presets**, or type a model id directly:
 > what we want here. For dictation (audio-*in* → text) use one of the models above.
 
 Transcription is sent to the stable `generateContent` endpoint with your audio
-inlined as `audio/wav` (16 kHz mono PCM). Audio never touches any server but
-Google's.
+inlined as `audio/mp4` (16 kHz mono AAC, 32 kbps) — roughly 8× smaller than the
+PCM WAV this used to send, so the upload stops padding the pause between
+releasing the key and seeing text. Gemini bills audio by duration rather than
+bytes, so the smaller file costs exactly the same. Audio never touches any
+server but Google's.
 
 ## Keeping permissions across rebuilds
 

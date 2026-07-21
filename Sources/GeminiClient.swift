@@ -62,7 +62,8 @@ enum GeminiClient {
                            apiKey: String,
                            model: String,
                            instruction: String,
-                           thinkingBudget: Int) async throws -> TranscriptionResult {
+                           thinkingBudget: Int,
+                           mimeType: String = AudioFormat.mimeType) async throws -> TranscriptionResult {
         // Keys pasted from a webpage often carry a trailing newline/space, which
         // otherwise fails auth with a confusing 400. Trim before use.
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -82,7 +83,7 @@ enum GeminiClient {
                 "contents": [[
                     "parts": [
                         ["text": instruction],
-                        ["inline_data": ["mime_type": "audio/wav", "data": base64]],
+                        ["inline_data": ["mime_type": mimeType, "data": base64]],
                     ]
                 ]],
                 "generationConfig": gen,
@@ -123,6 +124,7 @@ enum GeminiClient {
                                     model: String,
                                     instruction: String,
                                     thinkingBudget: Int,
+                                    mimeType: String = AudioFormat.mimeType,
                                     onDelta: @escaping (String) -> Void) async throws -> TranscriptionResult {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { throw GeminiError.noKey }
@@ -140,7 +142,7 @@ enum GeminiClient {
                 "contents": [[
                     "parts": [
                         ["text": instruction],
-                        ["inline_data": ["mime_type": "audio/wav", "data": base64]],
+                        ["inline_data": ["mime_type": mimeType, "data": base64]],
                     ]
                 ]],
                 "generationConfig": gen,
@@ -223,6 +225,41 @@ enum GeminiClient {
         let m = message.lowercased()
         return m.contains("thinking") || m.contains("thinkinglevel") || m.contains("thinking_level")
             || m.contains("thinkingbudget") || m.contains("thinking_budget")
+    }
+
+    // MARK: Connection prewarm
+
+    private static let warmLock = NSLock()
+    private static var lastWarm = Date.distantPast
+    /// Comfortably inside the pool's idle keep-alive, so back-to-back takes don't
+    /// re-warm a connection that is already open.
+    private static let warmInterval: TimeInterval = 45
+
+    /// Opens the connection to the API host while the user is still speaking.
+    ///
+    /// Otherwise DNS, the TCP handshake and the TLS handshake all happen *after*
+    /// the hotkey is released — dead time the user reads as the app being slow.
+    /// `URLSession.shared` pools connections, so the transcription request that
+    /// follows reuses this one. Best-effort and fire-and-forget: the response is
+    /// discarded, a failure just means we paid nothing, and the metadata endpoint
+    /// costs no tokens.
+    static func prewarm(apiKey: String, model: String) {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelID = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !modelID.isEmpty,
+              let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelID)")
+        else { return }
+
+        warmLock.lock()
+        let due = Date().timeIntervalSince(lastWarm) > warmInterval
+        if due { lastWarm = Date() }
+        warmLock.unlock()
+        guard due else { return }
+
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 5
+        req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+        URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
     }
 
     /// Lightweight check that the key + model are valid: a GET on the model's

@@ -304,6 +304,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try recorder.start()
             state.status = .recording
+            // Open the connection now, while there's speech still to come, so the
+            // handshake isn't billed to the pause after the key is released.
+            GeminiClient.prewarm(apiKey: state.apiKey, model: state.model)
             if state.playSounds { Sound.start() }
             startRecordTimer()
             refreshUI()
