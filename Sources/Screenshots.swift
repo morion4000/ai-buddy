@@ -5,7 +5,41 @@ import UniformTypeIdentifiers
 /// `screencapture -i` UI) and shows each shot as a draggable thumbnail floating
 /// on the right edge of the screen.
 final class ScreenshotController {
-    private lazy var panel = ShotPanel()
+    private lazy var panel: ShotPanel = {
+        let p = ShotPanel()
+        p.showsAskBadge = { [weak self] in self?.askEnabled() ?? false }
+        p.onAskToggle = { [weak self] url in
+            guard let self else { return }
+            if self.armedShotURL == url { self.disarm() } else { self.arm(url) }
+        }
+        p.onShotRemoved = { [weak self] url in
+            guard let self, self.armedShotURL == url else { return }
+            self.armedShotURL = nil
+        }
+        return p
+    }()
+
+    /// Whether voice questions are enabled at all (the Settings toggle).
+    var askEnabled: () -> Bool = { true }
+
+    /// The shot the next hold-to-talk take should ask Gemini about, if any.
+    /// Set on capture (when enabled) or via the thumbnail's mic badge; cleared
+    /// once a question is answered or the thumbnail leaves the screen.
+    private(set) var armedShotURL: URL?
+
+    /// Where the thumbnail stack currently sits, so the answer panel can dock
+    /// beside it (nil when no thumbnails are showing).
+    var stackFrame: NSRect? { panel.isVisible ? panel.frame : nil }
+
+    func disarm() {
+        armedShotURL = nil
+        panel.setArmed(url: nil)
+    }
+
+    private func arm(_ url: URL) {
+        armedShotURL = url
+        panel.setArmed(url: url)
+    }
 
     private let dir: URL = {
         let d = FileManager.default.temporaryDirectory.appendingPathComponent("AIBuddyShots", isDirectory: true)
@@ -24,7 +58,12 @@ final class ScreenshotController {
             // No file means the user pressed Esc to cancel — nothing to show.
             guard FileManager.default.fileExists(atPath: file.path),
                   let image = NSImage(contentsOf: file) else { return }
-            DispatchQueue.main.async { self.panel.addShot(image: image, url: file) }
+            DispatchQueue.main.async {
+                self.panel.addShot(image: image, url: file)
+                // A fresh capture is what the user is most likely asking about —
+                // arm it so "grab, hold the hotkey, ask" needs no extra click.
+                if self.askEnabled() { self.arm(file) }
+            }
         }
     }
 }
@@ -37,6 +76,14 @@ final class ShotPanel: NSPanel {
     private let spacing: CGFloat = 10
     private let margin: CGFloat = 16
     private var thumbs: [ThumbnailView] = []
+
+    /// Set by the controller: whether new thumbnails get the voice-question badge.
+    var showsAskBadge: () -> Bool = { true }
+    /// Mic badge clicked on the shot at this URL — the controller flips its armed state.
+    var onAskToggle: ((URL) -> Void)?
+    /// A thumbnail left the screen (dismissed or dragged out) — lets the
+    /// controller disarm a shot the user can no longer see.
+    var onShotRemoved: ((URL) -> Void)?
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
@@ -57,8 +104,10 @@ final class ShotPanel: NSPanel {
 
     func addShot(image: NSImage, url: URL) {
         let height = thumbHeight(for: image)
-        let thumb = ThumbnailView(image: image, url: url, width: thumbWidth, height: height)
+        let thumb = ThumbnailView(image: image, url: url, width: thumbWidth, height: height,
+                                  withAskBadge: showsAskBadge())
         thumb.onClose = { [weak self] t in self?.remove(t) }
+        thumb.onAskToggle = { [weak self] in self?.onAskToggle?(url) }
         thumbs.insert(thumb, at: 0) // newest on top
         contentView?.addSubview(thumb)
         relayout()
@@ -71,6 +120,12 @@ final class ShotPanel: NSPanel {
         thumb.removeFromSuperview()
         thumbs.removeAll { $0 === thumb }
         if thumbs.isEmpty { orderOut(nil) } else { relayout() }
+        onShotRemoved?(thumb.url)
+    }
+
+    /// Reflects the single armed shot (or none) on every thumbnail's mic badge.
+    func setArmed(url: URL?) {
+        for t in thumbs { t.setArmed(t.url == url) }
     }
 
     private func thumbHeight(for image: NSImage) -> CGFloat {
@@ -167,16 +222,89 @@ final class CloseBadge: NSView {
     }
 }
 
+/// The voice-question badge: a disc with a white mic glyph, blue while the shot
+/// is "armed" (the next hold-to-talk take asks Gemini about this screenshot
+/// instead of dictating). Hand-drawn for the same reason as `CloseBadge`.
+final class AskBadge: NSView {
+    var onTap: (() -> Void)?
+    var armed = false {
+        didSet {
+            needsDisplay = true
+            toolTip = armed
+                ? "Armed — hold your talk key and ask about this shot · click to go back to dictation"
+                : "Click, then hold your talk key to ask Gemini about this shot"
+        }
+    }
+    private var pressed = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        toolTip = "Click, then hold your talk key to ask Gemini about this shot"
+    }
+    required init?(coder: NSCoder) { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let disc = NSBezierPath(ovalIn: bounds.insetBy(dx: 1.5, dy: 1.5))
+
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.45)
+        shadow.shadowBlurRadius = 2.5
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
+        var fill: NSColor = armed ? .systemBlue : NSColor(calibratedWhite: 0.32, alpha: 0.95)
+        if pressed { fill = fill.blended(withFraction: 0.25, of: .black) ?? fill }
+        fill.setFill()
+        disc.fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSColor.white.setStroke()
+        disc.lineWidth = 2
+        disc.stroke()
+
+        if let mic = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Ask about this screenshot")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.white])) {
+            // Aspect-fit inside the disc — draw(in:) alone would stretch the glyph.
+            let box = bounds.insetBy(dx: bounds.width * 0.3, dy: bounds.height * 0.27)
+            let s = mic.size
+            let scale = min(box.width / s.width, box.height / s.height)
+            let size = NSSize(width: s.width * scale, height: s.height * scale)
+            mic.draw(in: NSRect(x: box.midX - size.width / 2, y: box.midY - size.height / 2,
+                                width: size.width, height: size.height),
+                     from: .zero, operation: .sourceOver, fraction: 1)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        pressed = true
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        pressed = false
+        needsDisplay = true
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onTap?() }
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+}
+
 /// A thumbnail you can drag into any app (drops the PNG file / image), click to
 /// copy to the clipboard, or dismiss with the ✕ button.
 final class ThumbnailView: NSView, NSDraggingSource {
     let url: URL
     private let image: NSImage
     var onClose: ((ThumbnailView) -> Void)?
+    var onAskToggle: (() -> Void)?
+    private var askBadge: AskBadge?
     private var mouseDownPoint: NSPoint = .zero
     private var dragging = false
 
-    init(image: NSImage, url: URL, width: CGFloat, height: CGFloat) {
+    init(image: NSImage, url: URL, width: CGFloat, height: CGFloat, withAskBadge: Bool) {
         self.image = image
         self.url = url
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
@@ -204,9 +332,20 @@ final class ThumbnailView: NSView, NSDraggingSource {
         close.autoresizingMask = [.minXMargin, .minYMargin]
         addSubview(close)
 
+        if withAskBadge {
+            let ask = AskBadge(frame: NSRect(x: width - closeSize - inset, y: inset,
+                                             width: closeSize, height: closeSize))
+            ask.onTap = { [weak self] in self?.onAskToggle?() }
+            ask.autoresizingMask = [.minXMargin, .maxYMargin]
+            addSubview(ask)
+            askBadge = ask
+        }
+
         toolTip = "Drag into any app · click to copy · double-click to open · right-click for more · ✕ to dismiss"
     }
     required init?(coder: NSCoder) { nil }
+
+    func setArmed(_ armed: Bool) { askBadge?.armed = armed }
 
     @objc private func closeTapped() { onClose?(self) }
 

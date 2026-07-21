@@ -87,6 +87,47 @@ enum TextInjector {
         }
     }
 
+    // MARK: Incremental correction
+
+    /// The edit that turns `typed` into `target`: how many characters to remove
+    /// from the end, then what to type in their place.
+    ///
+    /// Text already on screen gets revised — the on-device draft rewrites its own
+    /// tail as it hears more, and Gemini's final wording differs again. Retyping
+    /// everything each time would make the cursor thrash, so the shared prefix is
+    /// kept and only the part that actually changed is rewritten, which is usually
+    /// the last word or two.
+    static func edit(from typed: String, to target: String) -> (delete: Int, insert: String) {
+        let old = Array(typed), new = Array(target)
+        var shared = 0
+        while shared < old.count, shared < new.count, old[shared] == new[shared] { shared += 1 }
+        return (old.count - shared, String(new[shared...]))
+    }
+
+    /// Deletes backwards then types, both on the serial queue so they land in order.
+    static func applyEdit(delete: Int, insert: String) {
+        deleteBackward(delete)
+        if !insert.isEmpty { typeUnicode(insert) }
+    }
+
+    /// Virtual keycode 51 is Delete (backspace). One press removes one character in
+    /// every text field we can reach, so the count is in characters, not bytes.
+    private static let deleteKeyCode: CGKeyCode = 51
+
+    static func deleteBackward(_ count: Int) {
+        guard count > 0 else { return }
+        let src = CGEventSource(stateID: .combinedSessionState)
+        typeQueue.async {
+            for _ in 0..<count {
+                CGEvent(keyboardEventSource: src, virtualKey: deleteKeyCode, keyDown: true)?
+                    .post(tap: .cgSessionEventTap)
+                CGEvent(keyboardEventSource: src, virtualKey: deleteKeyCode, keyDown: false)?
+                    .post(tap: .cgSessionEventTap)
+                usleep(2_000)
+            }
+        }
+    }
+
     /// Splits text into <= 20 UTF-16 code units per event (a hard CGEvent limit),
     /// never splitting a grapheme/surrogate pair.
     private static func utf16Chunks(_ text: String) -> [[UniChar]] {

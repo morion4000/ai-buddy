@@ -211,6 +211,52 @@ enum GeminiClient {
         }
     }
 
+    /// Answers a spoken question about a screenshot: one `generateContent` call
+    /// carrying the instruction, the PNG, and the recorded audio, so the question
+    /// never needs a separate transcription round-trip.
+    static func answerAboutImage(audioURL: URL,
+                                 imageURL: URL,
+                                 apiKey: String,
+                                 model: String,
+                                 instruction: String,
+                                 audioMimeType: String = AudioFormat.mimeType) async throws -> TranscriptionResult {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw GeminiError.noKey }
+
+        let audio = try Data(contentsOf: audioURL)
+        let image = try Data(contentsOf: imageURL)
+        let modelID = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(modelID):generateContent"
+        guard let url = URL(string: endpoint) else { throw GeminiError.badResponse }
+
+        // No thinkingConfig here: unlike verbatim transcription, answering benefits
+        // from the model's default reasoning, and the user is reading — not waiting
+        // to keep typing — so the extra latency is acceptable.
+        let body: [String: Any] = [
+            "contents": [[
+                "parts": [
+                    ["text": instruction],
+                    ["inline_data": ["mime_type": "image/png", "data": image.base64EncodedString()]],
+                    ["inline_data": ["mime_type": audioMimeType, "data": audio.base64EncodedString()]],
+                ]
+            ]],
+        ]
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 60
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let data = try await send(req, retries: 2)
+        guard let text = extractText(from: data) else { throw GeminiError.empty }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { throw GeminiError.empty }
+        let usage = extractUsage(from: data)
+        return TranscriptionResult(text: trimmed, inputTokens: usage.input, outputTokens: usage.output)
+    }
+
     /// A 0 thinking budget disables reasoning — the single biggest latency win, and
     /// the default here since verbatim transcription needs none. Works on Flash 2.x
     /// and 3.x alike (verified against the API); if some model ever rejects the

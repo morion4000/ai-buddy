@@ -10,10 +10,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let engine = HotkeyEngine()
     private let shotEngine = HotkeyEngine()
     private let shots = ScreenshotController()
+    private let answerPanel = AnswerPanel()
     private let recorder = Recorder()
+    private let liveTranscriber = LiveTranscriber()
     /// Set when we muted system audio for this take, so we restore exactly what
     /// we changed at the end (and never touch audio we didn't mute).
     private var audioRestore: SystemAudio.Restore?
+
+    /// Whether this take is typing an on-device draft, and exactly what that draft
+    /// has put on screen — so the text can be corrected to Gemini's wording later
+    /// without disturbing anything the draft didn't write.
+    private var draftActive = false
+    private var typedDraft = ""
 
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
@@ -55,10 +63,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // If a recording dies mid-take (mic unplugged, encode error), don't keep
         // believing we're recording — recover so the next press works.
         recorder.onUnexpectedStop = { [weak self] in self?.handleRecorderFailure() }
+        liveTranscriber.onDraft = { [weak self] draft in self?.applyDraft(draft) }
 
         state.onScreenshotHotkeyChange = { [weak self] in self?.applyScreenshotHotkeyConfig() }
         state.onRecentsChange = { [weak self] in self?.rebuildMenu() }
         shotEngine.onStart = { [weak self] in self?.triggerScreenshot() }
+        shots.askEnabled = { [weak self] in self?.state.askScreenshots ?? false }
 
         // Ask for the mic up front so the first dictation isn't blocked.
         if Permissions.micStatus() == .notDetermined { Permissions.requestMic { _ in } }
@@ -307,6 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Open the connection now, while there's speech still to come, so the
             // handshake isn't billed to the pause after the key is released.
             GeminiClient.prewarm(apiKey: state.apiKey, model: state.model)
+            startDraftIfEnabled()
             if state.playSounds { Sound.start() }
             startRecordTimer()
             refreshUI()
@@ -321,6 +332,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopAndTranscribe() {
         guard state.status == .recording else { return }
         stopRecordTimer()
+        // Recognition stops here; whatever it already typed stays on screen until
+        // Gemini's wording arrives to correct it.
+        liveTranscriber.stop()
         if state.playSounds { Sound.stop() }
         unmuteAudioIfMuted()
 
@@ -340,6 +354,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // A screenshot armed for a voice question turns this take into a question
+        // about that shot instead of a dictation.
+        if state.askScreenshots, let shotURL = shots.armedShotURL {
+            askGemini(about: shotURL, audioURL: result.url)
+            return
+        }
+
         state.status = .transcribing
         refreshUI()
         startTranscribeWatchdog()
@@ -350,8 +371,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let thinkingBudget = state.thinkingBudget
         let url = result.url
         // Stream + type-live only when we'd actually inject at the cursor and can
-        // (Accessibility granted). Otherwise use the plain one-shot request.
-        let stream = state.streamText && state.insertAtCursor && Permissions.hasAccessibility()
+        // (Accessibility granted). Otherwise use the plain one-shot request. A take
+        // that's drafting never streams: the draft already owns the cursor, and
+        // typing deltas on top of it would interleave two sources of text.
+        let stream = state.streamText && state.insertAtCursor
+            && Permissions.hasAccessibility() && !draftActive
 
         transcribeGeneration += 1
         let gen = transcribeGeneration
@@ -383,8 +407,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 switch outcome {
                 case .success(let result):
                     self.state.recordUsage(input: result.inputTokens, output: result.outputTokens, model: model)
-                    if stream { self.handleStreamedTranscription(result.text) }
-                    else      { self.handleTranscription(result.text) }
+                    if self.draftActive { self.handleDraftedTranscription(result.text) }
+                    else if stream      { self.handleStreamedTranscription(result.text) }
+                    else                { self.handleTranscription(result.text) }
                 case .failure(let error):
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.handleError(message)
@@ -393,10 +418,113 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: Voice questions about a screenshot
+
+    /// Sends the recorded question plus the armed screenshot to Gemini and shows
+    /// the answer beside the thumbnail. Mirrors the transcription flow's watchdog
+    /// and generation bookkeeping so cancel/reset work the same way.
+    private func askGemini(about shotURL: URL, audioURL url: URL) {
+        // The spoken words are a question, not dictation — remove any live draft
+        // they may have typed at the cursor.
+        discardDraft()
+
+        state.status = .transcribing
+        refreshUI()
+        // Image + audio + the model's default thinking is slower than plain
+        // transcription; give the answer twice the ceiling before calling it stuck.
+        startTranscribeWatchdog(seconds: 60)
+
+        let apiKey = state.apiKey
+        let model = state.model
+
+        transcribeGeneration += 1
+        let gen = transcribeGeneration
+        transcribeTask?.cancel()
+        transcribeTask = Task {
+            let outcome: Result<TranscriptionResult, Error>
+            do {
+                outcome = .success(try await GeminiClient.answerAboutImage(
+                    audioURL: url, imageURL: shotURL, apiKey: apiKey, model: model,
+                    instruction: AppState.askInstruction))
+            } catch {
+                outcome = .failure(error)
+            }
+            try? FileManager.default.removeItem(at: url)
+            await MainActor.run { [weak self] in
+                guard let self, gen == self.transcribeGeneration else { return }
+                switch outcome {
+                case .success(let result):
+                    self.state.recordUsage(input: result.inputTokens, output: result.outputTokens, model: model)
+                    self.handleAnswer(result.text)
+                case .failure(let error):
+                    let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.handleError(message, title: "Couldn’t answer the question")
+                }
+            }
+        }
+    }
+
+    /// Shows the answer and returns the hotkey to plain dictation. On failure the
+    /// shot stays armed instead, so asking again is just another hotkey press.
+    private func handleAnswer(_ text: String) {
+        stopTranscribeWatchdog()
+        shots.disarm()
+        if state.copyToClipboard {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+        answerPanel.show(text, nextTo: shots.stackFrame)
+        state.status = .idle
+        refreshUI()
+    }
+
+    // MARK: On-device draft
+
+    /// Starts drafting only when the text would actually go somewhere — there's no
+    /// point recognizing on-device if we can't type the result at the cursor.
+    private func startDraftIfEnabled() {
+        typedDraft = ""
+        // An armed screenshot means this take is a spoken question, not dictation —
+        // nothing should be typed at the cursor.
+        draftActive = state.liveDraft
+            && state.insertAtCursor
+            && !(state.askScreenshots && shots.armedShotURL != nil)
+            && Permissions.hasAccessibility()
+            && LiveTranscriber.isAuthorized
+        if draftActive { liveTranscriber.start() }
+    }
+
+    /// Rewrites only the part of the on-screen draft that changed.
+    private func applyDraft(_ draft: String) {
+        guard draftActive, state.status == .recording else { return }
+        let edit = TextInjector.edit(from: typedDraft, to: draft)
+        guard edit.delete > 0 || !edit.insert.isEmpty else { return }
+        TextInjector.applyEdit(delete: edit.delete, insert: edit.insert)
+        typedDraft = draft
+    }
+
+    /// Removes the provisional text, for when the user explicitly discards a take.
+    private func discardDraft() {
+        liveTranscriber.stop()
+        if !typedDraft.isEmpty { TextInjector.deleteBackward(typedDraft.count) }
+        typedDraft = ""
+        draftActive = false
+    }
+
+    /// Leaves the provisional text in place but stops tracking it. Used when Gemini
+    /// fails: the on-device draft is still genuinely the user's words, and deleting
+    /// it would turn a degraded result into a total loss.
+    private func keepDraftAsIs() {
+        liveTranscriber.stop()
+        typedDraft = ""
+        draftActive = false
+    }
+
     /// Discards an in-progress recording without sending it to Gemini.
     private func cancelRecording() {
         guard state.status == .recording else { return }
         stopRecordTimer()
+        discardDraft()
         if let result = recorder.stop() {
             try? FileManager.default.removeItem(at: result.url)
         }
@@ -438,11 +566,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Transcription watchdog (hard ceiling so `.transcribing` can't wedge)
 
-    private func startTranscribeWatchdog() {
+    private func startTranscribeWatchdog(seconds: TimeInterval = 30) {
         stopTranscribeWatchdog()
-        // 30s cap: cancel a stalled request and reset, so a slow or hung network
+        // Hard cap: cancel a stalled request and reset, so a slow or hung network
         // never leaves the app stuck transcribing with no way back.
-        transcribeWatchdog = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in
+        transcribeWatchdog = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             guard let self, case .transcribing = self.state.status else { return }
             self.transcribeGeneration += 1   // ignore the in-flight task's eventual result
             self.transcribeTask?.cancel()
@@ -579,6 +707,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Finalizes a streamed transcription. The text was already typed at the cursor
     /// as it streamed, so this only records it and refreshes the clipboard.
+    /// The draft is already on screen; correct it to Gemini's wording in place,
+    /// touching only the characters that actually differ.
+    private func handleDraftedTranscription(_ text: String) {
+        stopTranscribeWatchdog()
+        state.addRecent(text)
+        if state.copyToClipboard {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+
+        let edit = TextInjector.edit(from: typedDraft, to: text)
+        TextInjector.applyEdit(delete: edit.delete, insert: edit.insert)
+        typedDraft = ""
+        draftActive = false
+
+        state.status = .idle
+        refreshUI()
+    }
+
     private func handleStreamedTranscription(_ text: String) {
         stopTranscribeWatchdog()
         state.addRecent(text)
@@ -590,11 +737,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshUI()
     }
 
-    private func handleError(_ message: String) {
+    private func handleError(_ message: String, title: String = "Transcription failed") {
         stopTranscribeWatchdog()
         if state.playSounds { Sound.error() }
         state.status = .error(message)
-        Notify.show("Transcription failed", message)
+        Notify.show(title, message)
         refreshUI()
         resetIdleSoon()
     }

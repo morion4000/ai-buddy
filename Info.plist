@@ -28,5 +28,7 @@
 	<string>© 2026</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>AI Buddy records your voice so Gemini can transcribe it to text.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>AI Buddy uses on-device speech recognition to show a draft of your words while you speak, before the final transcription arrives.</string>
 </dict>
 </plist>

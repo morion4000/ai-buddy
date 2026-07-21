@@ -217,6 +217,13 @@ struct SettingsView: View {
 
     // MARK: Output
 
+    private var liveDraftHelp: String {
+        if LiveTranscriber.isDenied {
+            return "Speech Recognition is turned off for AI Buddy. Enable it in System Settings ▸ Privacy & Security ▸ Speech Recognition to use this."
+        }
+        return "Recognizes your words on this Mac and types them as you talk, then corrects them to Gemini's version when it arrives — so text appears immediately instead of after the round trip. Needs the Speech Recognition permission, and rewrites the words it got wrong in place."
+    }
+
     private var outputContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Insert text at the cursor", isOn: $state.insertAtCursor)
@@ -226,6 +233,19 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Toggle("Stream text live (type as it's transcribed)", isOn: $state.streamText)
                 Text("Types words at the cursor as they arrive instead of pasting all at once, so text starts landing sooner. Turn off for a single paste at the end — more reliable in apps that dislike synthetic typing.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle("Show a draft while you speak (on-device)", isOn: $state.liveDraft)
+                    .onChange(of: state.liveDraft) { _, on in
+                        // Ask the first time it's switched on; without permission the
+                        // draft silently never appears.
+                        guard on, !LiveTranscriber.isAuthorized else { return }
+                        LiveTranscriber.requestAuthorization { granted in
+                            if !granted { state.liveDraft = false }
+                        }
+                    }
+                Text(liveDraftHelp)
                     .font(.caption2).foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -288,6 +308,10 @@ struct SettingsView: View {
             }
             .disabled(!state.screenshotsEnabled)
             Text("Tap it, draw a region, and the shot floats on the right edge — drag it into any app, click to copy, ✕ to dismiss. A single modifier needs a clean tap (so ⌘-shortcuts won’t trigger it). Needs Screen Recording permission.")
+                .font(.caption2).foregroundStyle(.secondary)
+            Divider()
+            Toggle("Ask about a new shot with your voice", isOn: $state.askScreenshots)
+            Text("Right after a capture, hold your talk hotkey and ask a question about it — Gemini’s answer pops up beside the thumbnail, then the hotkey goes back to dictation. The shot’s mic badge shows when it’s listening for a question; click the badge to switch it on or off per shot.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }

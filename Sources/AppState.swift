@@ -77,8 +77,16 @@ final class AppState: ObservableObject {
     /// Off by default: verbatim transcription needs no reasoning and thinking only
     /// adds latency. When on, we allow a small budget (see `thinkingBudget`).
     @Published var enableThinking: Bool    { didSet { d.set(enableThinking, forKey: K.enableThinking) } }
+    /// When on, type an on-device draft at the cursor while the user is still
+    /// speaking, then correct it to Gemini's wording once that arrives. Off by
+    /// default: it needs the Speech Recognition permission, and the in-place
+    /// correction is visible, so it should be opted into deliberately.
+    @Published var liveDraft: Bool         { didSet { d.set(liveDraft, forKey: K.liveDraft) } }
 
     // MARK: Screenshots
+    /// When on, a fresh capture "arms" the talk hotkey: hold it, speak a question
+    /// about the shot, and Gemini's answer pops up beside the thumbnail.
+    @Published var askScreenshots: Bool     { didSet { d.set(askScreenshots, forKey: K.askScreenshots) } }
     @Published var screenshotsEnabled: Bool { didSet { d.set(screenshotsEnabled, forKey: K.shotEnabled); onScreenshotHotkeyChange?() } }
     @Published var screenshotKeyCode: Int   { didSet { d.set(screenshotKeyCode, forKey: K.shotKey); onScreenshotHotkeyChange?() } }
     @Published var screenshotMods: Int      { didSet { d.set(screenshotMods, forKey: K.shotMods); onScreenshotHotkeyChange?() } }
@@ -118,9 +126,10 @@ final class AppState: ObservableObject {
         static let recents = "recents", configured = "configured", maxRecording = "maxRecordingSeconds"
         static let removeFillers = "removeFillers", muteWhileRecording = "muteWhileRecording"
         static let languages = "languages", streamText = "streamText"
-        static let enableThinking = "enableThinking"
+        static let enableThinking = "enableThinking", liveDraft = "liveDraft"
         static let modelMigrated35 = "modelDefault35Migrated"
         static let shotEnabled = "screenshotsEnabled", shotKey = "screenshotKeyCode", shotMods = "screenshotMods"
+        static let askScreenshots = "askScreenshots"
         static let usageCount = "usageCount", usageInput = "usageInputTokens", usageOutput = "usageOutputTokens"
         static let usageCost = "usageCost"
     }
@@ -130,6 +139,17 @@ final class AppState: ObservableObject {
     Output ONLY the transcribed text — no preamble, no quotation marks, no commentary, \
     no speaker labels, no timestamps. Preserve natural punctuation and capitalization. \
     If there is no intelligible speech, output nothing.
+    """
+
+    /// The prompt for a spoken question about a screenshot. Unlike transcription,
+    /// the output here is an *answer* the user reads, so it must be plain text
+    /// (no markdown — it renders verbatim in the answer panel) and stay concise.
+    static let askInstruction = """
+    You are AI Buddy, a helpful assistant on the user's Mac. The user captured the attached \
+    screenshot and is asking the spoken question in the attached audio about it. Answer the \
+    question directly and concisely in plain text — no markdown, no preamble, no restating \
+    the question. Answer in the same language the question was asked in. If the audio contains \
+    no intelligible question, briefly describe what the screenshot shows instead.
     """
 
     /// Appended to the prompt when "Remove filler words" is on. Phrased to drop
@@ -255,7 +275,9 @@ final class AppState: ObservableObject {
         languages           = AppState.effectiveLanguages(d.stringArray(forKey: K.languages) ?? [])
         streamText          = d.object(forKey: K.streamText) as? Bool ?? true
         enableThinking      = d.object(forKey: K.enableThinking) as? Bool ?? false
+        liveDraft           = d.object(forKey: K.liveDraft) as? Bool ?? false
 
+        askScreenshots      = d.object(forKey: K.askScreenshots) as? Bool ?? true
         screenshotsEnabled  = d.object(forKey: K.shotEnabled) as? Bool ?? true
         // Default trigger: a clean tap of Right ⌘ (keyCode 54), no extra modifiers.
         screenshotKeyCode   = d.object(forKey: K.shotKey) as? Int ?? 54
