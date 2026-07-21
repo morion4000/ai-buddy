@@ -150,15 +150,21 @@ enum GeminiClient {
         req.timeoutInterval = 30
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
-        req.httpBody = try makeBody(thinking: true)
+        let sendThinking = includeThinkingConfig(model: modelID, budget: thinkingBudget)
+        req.httpBody = try makeBody(thinking: sendThinking)
 
         let data: Data
         do {
             data = try await send(req, retries: 2)
-        } catch let GeminiError.http(code, msg) where code == 400 && isThinkingError(msg) {
-            // A model that rejects our thinking hint — retry once with its defaults.
+        } catch let GeminiError.http(code, _) where code == 400 && sendThinking {
+            // A model that rejects our thinking config — 3.6 Flash refuses a 0
+            // budget (it can't disable thinking) with a GENERIC "invalid argument"
+            // that never mentions thinking, so any 400 gets one retry with the
+            // model's own defaults. If that fixes it, remember the model so its
+            // takes skip the doomed first attempt from now on.
             req.httpBody = try makeBody(thinking: false)
             data = try await send(req, retries: 2)
+            if thinkingBudget == 0 { rememberRejectsZeroBudget(modelID) }
         }
 
         guard let text = extractText(from: data) else { throw GeminiError.empty }
@@ -215,19 +221,33 @@ enum GeminiClient {
     }
 
     /// A 0 thinking budget disables reasoning — the single biggest latency win, and
-    /// the default here since verbatim transcription needs none. Works on Flash 2.x
-    /// and 3.x alike (verified against the API); if some model ever rejects the
-    /// budget, the caller retries without any thinking config.
+    /// the default here since verbatim transcription needs none. Not every model
+    /// accepts it though (3.6 Flash can't disable thinking), so `transcribe` retries
+    /// without the config and remembers the rejection below.
     private static func generationConfig(thinkingBudget: Int) -> [String: Any] {
         ["temperature": 0, "thinkingConfig": ["thinkingBudget": thinkingBudget]]
     }
 
-    /// True when an API error looks like it's complaining about our thinking hint,
-    /// so we can retry without it rather than failing the transcription.
-    private static func isThinkingError(_ message: String) -> Bool {
-        let m = message.lowercased()
-        return m.contains("thinking") || m.contains("thinkinglevel") || m.contains("thinking_level")
-            || m.contains("thinkingbudget") || m.contains("thinking_budget")
+    // MARK: Models that reject a 0 thinking budget
+
+    /// Remembered across launches so those models' takes go straight to the
+    /// working request instead of paying a failed round-trip every time. A
+    /// user-chosen budget > 0 still sends the config — only 0 is the problem.
+    private static let zeroBudgetKey = "modelsRejectingZeroThinkingBudget"
+    private static let zeroBudgetLock = NSLock()
+    private static var rejectsZeroBudget: Set<String> = Set(
+        UserDefaults.standard.stringArray(forKey: zeroBudgetKey) ?? [])
+
+    private static func includeThinkingConfig(model: String, budget: Int) -> Bool {
+        guard budget == 0 else { return true }
+        zeroBudgetLock.lock(); defer { zeroBudgetLock.unlock() }
+        return !rejectsZeroBudget.contains(model)
+    }
+
+    private static func rememberRejectsZeroBudget(_ model: String) {
+        zeroBudgetLock.lock(); defer { zeroBudgetLock.unlock() }
+        rejectsZeroBudget.insert(model)
+        UserDefaults.standard.set(Array(rejectsZeroBudget), forKey: zeroBudgetKey)
     }
 
     // MARK: Connection prewarm
