@@ -124,7 +124,9 @@ if [[ "${RELEASE:-}" == "1" ]]; then
 
   # Refuse to overwrite a published version: the DMG name is immutable-cached,
   # so re-releasing the same version would serve stale bits to some users.
-  if curl -sf -o /dev/null -I "$FEED_BASE/$DMG_NAME"; then
+  # The cache-buster keeps this probe's 404 from being edge-cached on the real
+  # URL (Cloudflare holds negative hits for hours) and served after the upload.
+  if curl -sf -o /dev/null -I "$FEED_BASE/$DMG_NAME?precheck=$(date +%s)"; then
     echo "✗ $DMG_NAME is already published — bump the version in Info.plist first." >&2
     exit 1
   fi
