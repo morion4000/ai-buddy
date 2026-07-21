@@ -106,6 +106,67 @@ final class FlippedView: NSView {
     }
 }
 
+/// The dismiss badge: a red disc with a white ring and a bold white ✕.
+///
+/// Drawn by hand rather than styled through `NSButton`'s layer. A button re-renders
+/// its own backing layer from its cell, which silently discards a `backgroundColor`
+/// / `borderColor` / `cornerRadius` set on that layer — leaving nothing but a white
+/// glyph that disappears over a light screenshot.
+final class CloseBadge: NSView {
+    var onTap: (() -> Void)?
+    private var pressed = false
+
+    override func draw(_ dirtyRect: NSRect) {
+        // Inset by the ring width so the stroke stays inside the frame.
+        let disc = NSBezierPath(ovalIn: bounds.insetBy(dx: 1.5, dy: 1.5))
+
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.45)
+        shadow.shadowBlurRadius = 2.5
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
+        (pressed ? NSColor.systemRed.blended(withFraction: 0.25, of: .black) ?? .systemRed
+                 : .systemRed).setFill()
+        disc.fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSColor.white.setStroke()
+        disc.lineWidth = 2
+        disc.stroke()
+
+        let g = bounds.insetBy(dx: bounds.width * 0.33, dy: bounds.height * 0.33)
+        let glyph = NSBezierPath()
+        glyph.move(to: NSPoint(x: g.minX, y: g.minY))
+        glyph.line(to: NSPoint(x: g.maxX, y: g.maxY))
+        glyph.move(to: NSPoint(x: g.minX, y: g.maxY))
+        glyph.line(to: NSPoint(x: g.maxX, y: g.minY))
+        glyph.lineWidth = 2.5
+        glyph.lineCapStyle = .round
+        NSColor.white.setStroke()
+        glyph.stroke()
+    }
+
+    // Handling the whole click here also keeps it away from the thumbnail's
+    // click-to-copy and drag-out gestures.
+    override func mouseDown(with event: NSEvent) {
+        pressed = true
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        pressed = false
+        needsDisplay = true
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onTap?() }
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+}
+
 /// A thumbnail you can drag into any app (drops the PNG file / image), click to
 /// copy to the clipboard, or dismiss with the ✕ button.
 final class ThumbnailView: NSView, NSDraggingSource {
@@ -136,25 +197,10 @@ final class ThumbnailView: NSView, NSDraggingSource {
         // white ring, so it reads clearly over any screenshot.
         let closeSize: CGFloat = 28
         let inset: CGFloat = 6
-        let close = NSButton(frame: NSRect(x: width - closeSize - inset,
-                                           y: height - closeSize - inset,
-                                           width: closeSize, height: closeSize))
-        close.isBordered = false
-        close.wantsLayer = true
-        close.layer?.backgroundColor = NSColor.systemRed.cgColor
-        close.layer?.cornerRadius = closeSize / 2
-        close.layer?.borderColor = NSColor.white.cgColor
-        close.layer?.borderWidth = 2
-        close.layer?.shadowColor = NSColor.black.cgColor
-        close.layer?.shadowOpacity = 0.35
-        close.layer?.shadowRadius = 2
-        close.layer?.shadowOffset = CGSize(width: 0, height: -1)
-        close.attributedTitle = NSAttributedString(string: "✕", attributes: [
-            .foregroundColor: NSColor.white,
-            .font: NSFont.systemFont(ofSize: 16, weight: .heavy),
-        ])
-        close.target = self
-        close.action = #selector(closeTapped)
+        let close = CloseBadge(frame: NSRect(x: width - closeSize - inset,
+                                             y: height - closeSize - inset,
+                                             width: closeSize, height: closeSize))
+        close.onTap = { [weak self] in self?.closeTapped() }
         close.autoresizingMask = [.minXMargin, .minYMargin]
         addSubview(close)
 
