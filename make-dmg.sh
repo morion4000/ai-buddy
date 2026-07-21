@@ -140,6 +140,10 @@ if [[ "${RELEASE:-}" == "1" ]]; then
   }
   r2_put "$DMG" "$DMG_NAME" "application/x-apple-diskimage" "public, max-age=31536000, immutable"
 
+  # Stable alias for the website download button — always the newest build, so
+  # marketing pages never need touching on release. Mutable, so never cached.
+  r2_put "$DMG" "AI-Buddy.dmg" "application/x-apple-diskimage" "no-cache, max-age=0, must-revalidate"
+
   # The appcast is the mutable pointer the app polls — never edge-cache it stale.
   APPCAST="$BUILD/appcast.json"
   NOTES="${RELEASE_NOTES:-}"
