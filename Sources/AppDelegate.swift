@@ -191,6 +191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateMI.target = self
         menu.addItem(updateMI)
 
+        let githubMI = NSMenuItem(title: "AI Buddy on GitHub", action: #selector(openGitHub), keyEquivalent: "")
+        githubMI.target = self
+        menu.addItem(githubMI)
+
         let quitMI = NSMenuItem(title: "Quit AI Buddy", action: #selector(quit), keyEquivalent: "q")
         quitMI.target = self
         menu.addItem(quitMI)
@@ -726,6 +730,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn, let websiteURL {
             NSWorkspace.shared.open(websiteURL)
         }
+    }
+
+    @objc private func openGitHub() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/morion4000/ai-buddy")!)
     }
 
     @objc private func checkForUpdates() {
