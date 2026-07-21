@@ -212,19 +212,41 @@ struct SettingsView: View {
                  ? "Hold the hotkey while you speak, then release to transcribe. A single modifier key like Right ⌥ works great here."
                  : "Press once to start listening, press again to stop and transcribe.")
                 .font(.caption2).foregroundStyle(.secondary)
-            Text("Got a bad result? Double-tap the hotkey within 30 seconds: the inserted text is deleted and the same audio goes back to Gemini for a more careful second pass.")
-                .font(.caption2).foregroundStyle(.secondary)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Redo a bad take").font(.subheadline.weight(.medium))
+                Picker("Retry trigger", selection: $state.retryTrigger) {
+                    ForEach(RetryTrigger.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                if state.retryTrigger == .hotkey {
+                    HStack {
+                        Text("Retry hotkey").font(.subheadline.weight(.medium))
+                        Spacer()
+                        ShortcutRecorderView(keyCode: $state.retryKeyCode, mods: $state.retryMods)
+                    }
+                }
+                Text(retryHelp)
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var retryHelp: String {
+        switch state.retryTrigger {
+        case .doubleTap:
+            return "Double-tap the talk hotkey within 30 seconds of a take: the text it inserted is deleted and the same audio goes back to Gemini for a more careful second pass."
+        case .hotkey:
+            return "Tap the retry hotkey within 30 seconds of a take: the text it inserted is deleted and the same audio goes back to Gemini for a more careful second pass."
+        case .off:
+            return "No retry shortcut. Retry Last Take stays available in the menu bar for 30 seconds after each take."
         }
     }
 
     // MARK: Output
-
-    private var liveDraftHelp: String {
-        if LiveTranscriber.isDenied {
-            return "Speech Recognition is turned off for AI Buddy. Enable it in System Settings ▸ Privacy & Security ▸ Speech Recognition to use this."
-        }
-        return "Recognizes your words on this Mac and types them as you talk, then corrects them to Gemini's version when it arrives — so text appears immediately instead of after the round trip. Needs the Speech Recognition permission, and rewrites the words it got wrong in place."
-    }
 
     private var outputContent: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -232,24 +254,6 @@ struct SettingsView: View {
             Toggle("Copy text to the clipboard", isOn: $state.copyToClipboard)
             Toggle("Type characters instead of pasting (fallback for apps that block paste)",
                    isOn: $state.typeInsteadOfPaste)
-            VStack(alignment: .leading, spacing: 2) {
-                Toggle("Stream text live (type as it's transcribed)", isOn: $state.streamText)
-                Text("Types words at the cursor as they arrive instead of pasting all at once, so text starts landing sooner. Turn off for a single paste at the end — more reliable in apps that dislike synthetic typing.")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Toggle("Show a draft while you speak (on-device)", isOn: $state.liveDraft)
-                    .onChange(of: state.liveDraft) { _, on in
-                        // Ask the first time it's switched on; without permission the
-                        // draft silently never appears.
-                        guard on, !LiveTranscriber.isAuthorized else { return }
-                        LiveTranscriber.requestAuthorization { granted in
-                            if !granted { state.liveDraft = false }
-                        }
-                    }
-                Text(liveDraftHelp)
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
             VStack(alignment: .leading, spacing: 2) {
                 Toggle("Clean up filler words (um, uh, er…)", isOn: $state.removeFillers)
                 Text("Asks Gemini to drop “um”, “uh”, false starts, and stutters for cleaner text.")
@@ -322,24 +326,49 @@ struct SettingsView: View {
 
     private var usageContent: some View {
         let r = GeminiPricing.rates(for: state.model)
+        let month = AppState.monthKey()
+        let thisMonth = state.usageBuckets
+            .filter { $0.month == month }
+            .sorted { $0.cost > $1.cost }
+        let monthCost = thisMonth.reduce(0) { $0 + $1.cost }
+
         return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Transcriptions").foregroundStyle(.secondary)
-                Spacer()
-                Text("\(state.usageCount)")
-            }
-            HStack {
-                Text("Tokens (in / out)").foregroundStyle(.secondary)
-                Spacer()
-                Text("\(tokenStr(state.usageInputTokens)) / \(tokenStr(state.usageOutputTokens))")
-            }
-            HStack {
-                Text("Estimated cost").font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(String(format: "$%.4f", state.usageCost)).font(.subheadline.weight(.semibold))
+            Text("This month").font(.subheadline.weight(.semibold))
+            if thisMonth.isEmpty {
+                Text("No transcriptions yet this month.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(thisMonth) { b in
+                    HStack {
+                        Text(b.model)
+                        Spacer()
+                        Text("\(b.count) · \(tokenStr(b.inputTokens)) / \(tokenStr(b.outputTokens)) tok")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text(costStr(b.cost))
+                            .frame(minWidth: 64, alignment: .trailing)
+                    }
+                    .font(.callout)
+                }
+                HStack {
+                    Text("Month total").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(costStr(monthCost)).font(.subheadline.weight(.semibold))
+                }
             }
 
             Divider()
+
+            Text("Last 6 months").font(.subheadline.weight(.semibold))
+            usageTrend
+
+            Divider()
+
+            HStack {
+                Text("All time").foregroundStyle(.secondary)
+                Spacer()
+                Text("\(state.usageCount) takes · \(tokenStr(state.usageInputTokens)) / \(tokenStr(state.usageOutputTokens)) tok · \(costStr(state.usageCost))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
 
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -356,6 +385,35 @@ struct SettingsView: View {
                     .disabled(state.usageCount == 0)
             }
         }
+    }
+
+    /// Six slim bars, one per month, scaled to the most expensive of them — the
+    /// at-a-glance answer to "is this getting expensive".
+    private var usageTrend: some View {
+        let months = AppState.recentMonthKeys(6)
+        let totals = months.map { m in
+            state.usageBuckets.filter { $0.month == m }.reduce(0) { $0 + $1.cost }
+        }
+        let peak = max(totals.max() ?? 0, .leastNonzeroMagnitude)
+        return HStack(alignment: .bottom, spacing: 12) {
+            ForEach(Array(zip(months, totals)), id: \.0) { m, total in
+                VStack(spacing: 3) {
+                    Text(total > 0 ? costStr(total) : "—")
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.accentColor.opacity(m == AppState.monthKey() ? 1 : 0.45))
+                        .frame(width: 36, height: max(3, 48 * total / peak))
+                    Text(AppState.monthLabel(m))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    /// Adaptive cost string: sub-cent amounts keep the detail ("$0.0042"),
+    /// anything visible on a bill reads like money ("$1.28").
+    private func costStr(_ v: Double) -> String {
+        String(format: v < 0.01 ? "$%.4f" : "$%.2f", v)
     }
 
     private func tokenStr(_ n: Int) -> String {

@@ -11,6 +11,22 @@ enum TriggerMode: String, CaseIterable, Identifiable {
     var label: String { self == .hold ? "Hold to talk" : "Toggle on/off" }
 }
 
+/// What triggers a retry of the last take (delete its text, re-send its audio).
+enum RetryTrigger: String, CaseIterable, Identifiable {
+    case doubleTap  // two quick taps of the talk hotkey
+    case hotkey     // a dedicated shortcut
+    case off        // gesture disabled; the menu-bar item still works
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .doubleTap: return "Double-tap talk key"
+        case .hotkey:    return "Its own hotkey"
+        case .off:       return "Off"
+        }
+    }
+}
+
 /// Current activity of the app, surfaced in the menu bar + settings window.
 enum AppStatus: Equatable {
     case idle
@@ -33,6 +49,19 @@ struct TranscriptItem: Identifiable, Codable {
     var id = UUID()
     var text: String
     var date: Date
+}
+
+/// One month × model cell of usage, for the per-model breakdown and the
+/// month-over-month trend in Settings ▸ Usage & Cost.
+struct UsageBucket: Codable, Identifiable, Equatable {
+    var month: String   // "2026-07"
+    var model: String
+    var count: Int
+    var inputTokens: Int
+    var outputTokens: Int
+    var cost: Double
+
+    var id: String { "\(month)|\(model)" }
 }
 
 /// Single source of truth for settings + runtime state.
@@ -71,17 +100,15 @@ final class AppState: ObservableObject {
     /// Languages the speaker dictates in. Transcription is constrained to this set —
     /// English is always included and can't be removed. See `languagesDirective`.
     @Published var languages: [String]     { didSet { d.set(languages, forKey: K.languages) } }
-    /// When on, stream the transcription and type it at the cursor as it arrives
-    /// (feels faster) instead of pasting the whole thing once at the end.
-    @Published var streamText: Bool        { didSet { d.set(streamText, forKey: K.streamText) } }
     /// Off by default: verbatim transcription needs no reasoning and thinking only
     /// adds latency. When on, we allow a small budget (see `thinkingBudget`).
     @Published var enableThinking: Bool    { didSet { d.set(enableThinking, forKey: K.enableThinking) } }
-    /// When on, type an on-device draft at the cursor while the user is still
-    /// speaking, then correct it to Gemini's wording once that arrives. Off by
-    /// default: it needs the Speech Recognition permission, and the in-place
-    /// correction is visible, so it should be opted into deliberately.
-    @Published var liveDraft: Bool         { didSet { d.set(liveDraft, forKey: K.liveDraft) } }
+
+    // MARK: Retry
+    /// How the user redoes a bad take — see `RetryTrigger`.
+    @Published var retryTrigger: RetryTrigger { didSet { d.set(retryTrigger.rawValue, forKey: K.retryTrigger); onRetryHotkeyChange?() } }
+    @Published var retryKeyCode: Int          { didSet { d.set(retryKeyCode, forKey: K.retryKey); onRetryHotkeyChange?() } }
+    @Published var retryMods: Int             { didSet { d.set(retryMods, forKey: K.retryMods); onRetryHotkeyChange?() } }
 
     // MARK: Screenshots
     /// When on, a fresh capture "arms" the talk hotkey: hold it, speak a question
@@ -91,11 +118,15 @@ final class AppState: ObservableObject {
     @Published var screenshotKeyCode: Int   { didSet { d.set(screenshotKeyCode, forKey: K.shotKey); onScreenshotHotkeyChange?() } }
     @Published var screenshotMods: Int      { didSet { d.set(screenshotMods, forKey: K.shotMods); onScreenshotHotkeyChange?() } }
 
-    // MARK: Usage & cost (cumulative; cost accrued per transcription at that model's rate)
+    // MARK: Usage & cost (cost accrued per transcription at that model's rate)
+    // All-time totals…
     @Published var usageCount: Int          { didSet { d.set(usageCount, forKey: K.usageCount) } }
     @Published var usageInputTokens: Int    { didSet { d.set(usageInputTokens, forKey: K.usageInput) } }
     @Published var usageOutputTokens: Int   { didSet { d.set(usageOutputTokens, forKey: K.usageOutput) } }
     @Published var usageCost: Double        { didSet { d.set(usageCost, forKey: K.usageCost) } }
+    // …plus month × model buckets, which answer "is this getting expensive" —
+    // per-model breakdown for the current month and a trend across months.
+    @Published private(set) var usageBuckets: [UsageBucket] = [] { didSet { saveUsageBuckets() } }
 
     // MARK: Runtime (not persisted)
     @Published var status: AppStatus = .idle
@@ -111,6 +142,8 @@ final class AppState: ObservableObject {
     var onHotkeyOrModeChange: (() -> Void)?
     /// Set by the AppDelegate so the screenshot hotkey re-binds when it changes.
     var onScreenshotHotkeyChange: (() -> Void)?
+    /// Set by the AppDelegate so the retry hotkey re-binds when it changes.
+    var onRetryHotkeyChange: (() -> Void)?
     /// Keeps the native Recent Transcriptions menu synchronized with settings actions.
     var onRecentsChange: (() -> Void)?
 
@@ -125,13 +158,14 @@ final class AppState: ObservableObject {
         static let conversationKeywords = "conversationKeywords"
         static let recents = "recents", configured = "configured", maxRecording = "maxRecordingSeconds"
         static let removeFillers = "removeFillers", muteWhileRecording = "muteWhileRecording"
-        static let languages = "languages", streamText = "streamText"
-        static let enableThinking = "enableThinking", liveDraft = "liveDraft"
+        static let languages = "languages"
+        static let enableThinking = "enableThinking"
         static let modelMigrated35 = "modelDefault35Migrated"
         static let shotEnabled = "screenshotsEnabled", shotKey = "screenshotKeyCode", shotMods = "screenshotMods"
         static let askScreenshots = "askScreenshots"
+        static let retryTrigger = "retryTrigger", retryKey = "retryKeyCode", retryMods = "retryMods"
         static let usageCount = "usageCount", usageInput = "usageInputTokens", usageOutput = "usageOutputTokens"
-        static let usageCost = "usageCost"
+        static let usageCost = "usageCost", usageBuckets = "usageBuckets"
     }
 
     static let defaultInstruction = """
@@ -289,9 +323,13 @@ final class AppState: ObservableObject {
         removeFillers       = d.object(forKey: K.removeFillers) as? Bool ?? false
         muteWhileRecording  = d.object(forKey: K.muteWhileRecording) as? Bool ?? true
         languages           = AppState.effectiveLanguages(d.stringArray(forKey: K.languages) ?? [])
-        streamText          = d.object(forKey: K.streamText) as? Bool ?? true
         enableThinking      = d.object(forKey: K.enableThinking) as? Bool ?? false
-        liveDraft           = d.object(forKey: K.liveDraft) as? Bool ?? false
+
+        retryTrigger        = RetryTrigger(rawValue: d.string(forKey: K.retryTrigger) ?? "") ?? .doubleTap
+        // Default retry shortcut: a clean tap of Right ⌃ (keyCode 62) — the only
+        // right-side modifier the talk and screenshot defaults haven't claimed.
+        retryKeyCode        = d.object(forKey: K.retryKey) as? Int ?? 62
+        retryMods           = d.integer(forKey: K.retryMods)
 
         askScreenshots      = d.object(forKey: K.askScreenshots) as? Bool ?? true
         screenshotsEnabled  = d.object(forKey: K.shotEnabled) as? Bool ?? true
@@ -303,6 +341,10 @@ final class AppState: ObservableObject {
         usageInputTokens  = d.integer(forKey: K.usageInput)
         usageOutputTokens = d.integer(forKey: K.usageOutput)
         usageCost         = d.double(forKey: K.usageCost)
+        if let data = d.data(forKey: K.usageBuckets),
+           let buckets = try? JSONDecoder().decode([UsageBucket].self, from: data) {
+            usageBuckets = buckets
+        }
 
         if let data = d.data(forKey: K.recents),
            let items = try? JSONDecoder().decode([TranscriptItem].self, from: data) {
@@ -325,10 +367,24 @@ final class AppState: ObservableObject {
     }
 
     func recordUsage(input: Int, output: Int, model: String) {
+        let cost = GeminiPricing.cost(model: model, inputTokens: input, outputTokens: output)
         usageCount += 1
         usageInputTokens += input
         usageOutputTokens += output
-        usageCost += GeminiPricing.cost(model: model, inputTokens: input, outputTokens: output)
+        usageCost += cost
+
+        let month = AppState.monthKey()
+        var buckets = usageBuckets
+        if let i = buckets.firstIndex(where: { $0.month == month && $0.model == model }) {
+            buckets[i].count += 1
+            buckets[i].inputTokens += input
+            buckets[i].outputTokens += output
+            buckets[i].cost += cost
+        } else {
+            buckets.append(UsageBucket(month: month, model: model, count: 1,
+                                       inputTokens: input, outputTokens: output, cost: cost))
+        }
+        usageBuckets = buckets
     }
 
     func resetUsage() {
@@ -336,6 +392,40 @@ final class AppState: ObservableObject {
         usageInputTokens = 0
         usageOutputTokens = 0
         usageCost = 0
+        usageBuckets = []
+    }
+
+    // MARK: Month bucketing
+
+    private static let monthFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM"
+        return f
+    }()
+
+    static func monthKey(for date: Date = Date()) -> String {
+        monthFormatter.string(from: date)
+    }
+
+    /// The last `n` month keys, oldest first, current month last — the trend's x-axis.
+    static func recentMonthKeys(_ n: Int) -> [String] {
+        let cal = Calendar.current
+        return (0..<n).reversed().compactMap { back in
+            cal.date(byAdding: .month, value: -back, to: Date()).map(monthKey)
+        }
+    }
+
+    /// "2026-07" → "Jul" (localized short month name).
+    static func monthLabel(_ key: String) -> String {
+        guard let date = monthFormatter.date(from: key) else { return key }
+        let f = DateFormatter()
+        f.dateFormat = "MMM"
+        return f.string(from: date)
+    }
+
+    private func saveUsageBuckets() {
+        if let data = try? JSONEncoder().encode(usageBuckets) { d.set(data, forKey: K.usageBuckets) }
     }
 
     func addRecent(_ text: String) {

@@ -23,11 +23,16 @@ struct TranscriptionResult {
     let outputTokens: Int
 }
 
-/// Built-in Gemini price list (USD per 1M tokens). Input uses each model's
-/// AUDIO-input rate, since this app always sends audio. Source:
-/// https://ai.google.dev/gemini-api/docs/pricing (checked Jun 2026).
+/// Gemini price list (USD per 1M tokens). Input uses each model's AUDIO-input
+/// rate, since this app always sends audio.
+///
+/// The compiled-in table is only the fallback: rates are served remotely as
+/// pricing.json beside the update feed's appcast, refreshed at launch and cached
+/// across launches — so when Google changes prices the estimate stays honest
+/// without shipping a build. Source of truth is pricing.json in the repo, which
+/// each release publishes: https://ai.google.dev/gemini-api/docs/pricing
 enum GeminiPricing {
-    private static let table: [String: (input: Double, output: Double)] = [
+    private static let builtin: [String: (input: Double, output: Double)] = [
         "gemini-2.5-flash":       (1.00, 2.50),
         "gemini-2.5-flash-lite":  (0.30, 0.40),
         "gemini-3.5-flash":       (1.50, 9.00),
@@ -38,14 +43,62 @@ enum GeminiPricing {
         "gemini-flash-latest":    (1.50, 9.00), // tracks newest stable Flash (currently 3.5)
     ]
 
+    private static let feedURL = URL(string: "https://updates.claudete.co/ai-buddy/pricing.json")!
+    private static let cacheKey = "remotePricing"
+    private static let lock = NSLock()
+    /// Parsed remote rates; nil until the UserDefaults cache is read once.
+    /// An empty dictionary means "no usable remote data" and keeps a bad cache
+    /// from being re-parsed on every lookup.
+    private static var remote: [String: (input: Double, output: Double)]?
+
+    /// The live lookup table: remote rates layered over the built-ins, so a
+    /// served model id wins and unlisted ones keep their compiled-in rate.
+    private static func currentTable() -> [String: (input: Double, output: Double)] {
+        lock.lock(); defer { lock.unlock() }
+        if remote == nil {
+            remote = UserDefaults.standard.data(forKey: cacheKey).flatMap(parse) ?? [:]
+        }
+        guard let remote, !remote.isEmpty else { return builtin }
+        return builtin.merging(remote) { _, served in served }
+    }
+
+    /// Fetches the served pricing table; on success caches it and uses it from
+    /// then on. Fire-and-forget — any failure just means the current rates stand.
+    static func refresh() {
+        var req = URLRequest(url: feedURL)
+        req.timeoutInterval = 15
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            guard let data,
+                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let parsed = parse(data), !parsed.isEmpty else { return }
+            lock.lock()
+            remote = parsed
+            lock.unlock()
+            UserDefaults.standard.set(data, forKey: cacheKey)
+        }.resume()
+    }
+
+    /// pricing.json shape: {"models": {"<id>": {"input": <USD/1M>, "output": <USD/1M>}}}
+    private static func parse(_ data: Data) -> [String: (input: Double, output: Double)]? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = obj["models"] as? [String: [String: Any]] else { return nil }
+        var out: [String: (input: Double, output: Double)] = [:]
+        for (id, v) in models {
+            guard let input = v["input"] as? Double, let output = v["output"] as? Double else { continue }
+            out[id.lowercased()] = (input, output)
+        }
+        return out
+    }
+
     /// Rates for a model id. Exact match wins; otherwise the longest known prefix
     /// (covers dated/preview variants); else gemini-2.5-flash, flagged `known=false`.
     static func rates(for model: String) -> (input: Double, output: Double, known: Bool) {
+        let table = currentTable()
         let id = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if let r = table[id] { return (r.input, r.output, true) }
         if let key = table.keys.filter({ id.hasPrefix($0) }).max(by: { $0.count < $1.count }),
            let r = table[key] { return (r.input, r.output, true) }
-        let fallback = table["gemini-2.5-flash"]!
+        let fallback = table["gemini-2.5-flash"] ?? builtin["gemini-2.5-flash"]!
         return (fallback.input, fallback.output, false)
     }
 
@@ -112,103 +165,6 @@ enum GeminiClient {
         if trimmed.isEmpty { throw GeminiError.empty }
         let usage = extractUsage(from: data)
         return TranscriptionResult(text: trimmed, inputTokens: usage.input, outputTokens: usage.output)
-    }
-
-    /// Streaming transcription over `streamGenerateContent` (SSE). Calls `onDelta`
-    /// with whitespace-safe text pieces as they arrive — deltas never carry the
-    /// output's leading or a dangling trailing whitespace, so a caller can type
-    /// them straight to the cursor without a stray space or an accidental newline
-    /// (which could submit a chat field). Returns the full result at the end.
-    static func transcribeStreaming(audioURL: URL,
-                                    apiKey: String,
-                                    model: String,
-                                    instruction: String,
-                                    thinkingBudget: Int,
-                                    mimeType: String = AudioFormat.mimeType,
-                                    onDelta: @escaping (String) -> Void) async throws -> TranscriptionResult {
-        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { throw GeminiError.noKey }
-
-        let audio = try Data(contentsOf: audioURL)
-        let base64 = audio.base64EncodedString()
-        let modelID = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(modelID):streamGenerateContent?alt=sse"
-        guard let url = URL(string: endpoint) else { throw GeminiError.badResponse }
-
-        func makeBody(thinking: Bool) throws -> Data {
-            var gen = generationConfig(thinkingBudget: thinkingBudget)
-            if !thinking { gen.removeValue(forKey: "thinkingConfig") }
-            let body: [String: Any] = [
-                "contents": [[
-                    "parts": [
-                        ["text": instruction],
-                        ["inline_data": ["mime_type": mimeType, "data": base64]],
-                    ]
-                ]],
-                "generationConfig": gen,
-            ]
-            return try JSONSerialization.data(withJSONObject: body)
-        }
-
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.timeoutInterval = 60
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
-
-        func attempt(thinking: Bool) async throws -> TranscriptionResult {
-            req.httpBody = try makeBody(thinking: thinking)
-            let (bytes, response) = try await URLSession.shared.bytes(for: req)
-            guard let http = response as? HTTPURLResponse else { throw GeminiError.badResponse }
-            guard (200..<300).contains(http.statusCode) else {
-                var data = Data()
-                for try await b in bytes { data.append(b) }
-                let msg = errorMessage(from: data) ?? (String(data: data, encoding: .utf8) ?? "")
-                throw GeminiError.http(http.statusCode, msg)
-            }
-
-            var full = ""
-            var input = 0, output = 0
-            var trailing = ""     // whitespace held back so we never emit a trailing newline
-            var started = false   // drop the whole output's leading whitespace
-            for try await line in bytes.lines {
-                guard line.hasPrefix("data:") else { continue }
-                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                guard !payload.isEmpty, payload != "[DONE]",
-                      let d = payload.data(using: .utf8),
-                      let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
-                if let usage = obj["usageMetadata"] as? [String: Any] {
-                    input = usage["promptTokenCount"] as? Int ?? input
-                    output = usage["candidatesTokenCount"] as? Int ?? output
-                }
-                guard let delta = extractTextParts(obj), !delta.isEmpty else { continue }
-                full += delta
-                var piece = trailing + delta
-                if !started {
-                    piece = String(piece.drop(while: { $0.isWhitespace }))
-                    if piece.isEmpty { trailing = ""; continue }
-                    started = true
-                }
-                // Emit up to the last non-whitespace; buffer any trailing whitespace
-                // in case it's mid-text (a space before the next word) or the end.
-                if let lastNonWS = piece.lastIndex(where: { !$0.isWhitespace }) {
-                    let cut = piece.index(after: lastNonWS)
-                    trailing = String(piece[cut...])
-                    onDelta(String(piece[..<cut]))
-                } else {
-                    trailing = piece
-                }
-            }
-            let trimmed = full.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { throw GeminiError.empty }
-            return TranscriptionResult(text: trimmed, inputTokens: input, outputTokens: output)
-        }
-
-        do {
-            return try await attempt(thinking: true)
-        } catch let GeminiError.http(code, msg) where code == 400 && isThinkingError(msg) {
-            return try await attempt(thinking: false)
-        }
     }
 
     /// Answers a spoken question about a screenshot: one `generateContent` call

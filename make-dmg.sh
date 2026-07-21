@@ -153,6 +153,10 @@ print(json.dumps({"version": sys.argv[1], "url": sys.argv[2], "notes": sys.argv[
 EOF
   r2_put "$APPCAST" "appcast.json" "application/json" "no-cache, max-age=0, must-revalidate"
 
+  # The pricing table the app's cost estimate refreshes from — republished with
+  # every release so repo edits to pricing.json reach installed apps.
+  r2_put "$ROOT/pricing.json" "pricing.json" "application/json" "no-cache, max-age=0, must-revalidate"
+
   echo "  ✓ feed live: $FEED_BASE/appcast.json → $VERSION"
   echo "    installed apps will offer the update on their next daily check"
 

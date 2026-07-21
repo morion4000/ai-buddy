@@ -9,19 +9,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = AppState()
     private let engine = HotkeyEngine()
     private let shotEngine = HotkeyEngine()
+    private let retryEngine = HotkeyEngine()
     private let shots = ScreenshotController()
     private let answerPanel = AnswerPanel()
     private let recorder = Recorder()
-    private let liveTranscriber = LiveTranscriber()
     /// Set when we muted system audio for this take, so we restore exactly what
     /// we changed at the end (and never touch audio we didn't mute).
     private var audioRestore: SystemAudio.Restore?
-
-    /// Whether this take is typing an on-device draft, and exactly what that draft
-    /// has put on screen — so the text can be corrected to Gemini's wording later
-    /// without disturbing anything the draft didn't write.
-    private var draftActive = false
-    private var typedDraft = ""
 
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
@@ -83,19 +77,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // If a recording dies mid-take (mic unplugged, encode error), don't keep
         // believing we're recording — recover so the next press works.
         recorder.onUnexpectedStop = { [weak self] in self?.handleRecorderFailure() }
-        liveTranscriber.onDraft = { [weak self] draft in self?.applyDraft(draft) }
 
         state.onScreenshotHotkeyChange = { [weak self] in self?.applyScreenshotHotkeyConfig() }
         state.onRecentsChange = { [weak self] in self?.rebuildMenu() }
         shotEngine.onStart = { [weak self] in self?.triggerScreenshot() }
         shots.askEnabled = { [weak self] in self?.state.askScreenshots ?? false }
 
+        state.onRetryHotkeyChange = { [weak self] in self?.applyRetryHotkeyConfig() }
+        retryEngine.onStart = { [weak self] in self?.retryLastTake() }
+
         // Ask for the mic up front so the first dictation isn't blocked.
         if Permissions.micStatus() == .notDetermined { Permissions.requestMic { _ in } }
 
         applyHotkeyConfig()
         applyScreenshotHotkeyConfig()
-        if !engine.isRunning || (state.screenshotsEnabled && !shotEngine.isRunning) { scheduleEngineRetry() }
+        applyRetryHotkeyConfig()
+        if !engine.isRunning
+            || (state.screenshotsEnabled && !shotEngine.isRunning)
+            || (state.retryTrigger == .hotkey && !retryEngine.isRunning) { scheduleEngineRetry() }
 
         refreshUI()
 
@@ -108,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // doesn't collide with first-run setup.
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
             MainActor.assumeIsolated { Updater.shared.checkAutomatically() }
+            GeminiPricing.refresh()
         }
     }
 
@@ -184,6 +184,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let startMI = NSMenuItem(title: "Start Listening", action: #selector(manualToggle), keyEquivalent: "")
             startMI.target = self
             menu.addItem(startMI)
+            if hasRetryableTake {
+                let retryMI = NSMenuItem(title: "Retry Last Take", action: #selector(retryFromMenu), keyEquivalent: "")
+                retryMI.target = self
+                retryMI.toolTip = "Delete what the last take inserted and send its audio back to Gemini for a second pass."
+                menu.addItem(retryMI)
+            }
         }
 
         let shotMI = NSMenuItem(title: "Take Screenshot", action: #selector(takeScreenshot), keyEquivalent: "")
@@ -258,6 +264,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = shotEngine.start()
     }
 
+    private func applyRetryHotkeyConfig() {
+        guard state.retryTrigger == .hotkey else { retryEngine.stop(); return }
+        let flags = cgFlags(fromNSRaw: state.retryMods)
+        retryEngine.update(keyCode: CGKeyCode(state.retryKeyCode), flags: flags, mode: .tap)
+        _ = retryEngine.start()
+    }
+
     /// Hotkey path — only fires when the screenshot shortcut is enabled.
     private func triggerScreenshot() {
         guard state.screenshotsEnabled else { return }
@@ -297,8 +310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard Permissions.hasInputMonitoring() else { return }
             _ = self.engine.start()
             if self.state.screenshotsEnabled { _ = self.shotEngine.start() }
+            if self.state.retryTrigger == .hotkey { _ = self.retryEngine.start() }
             let shotReady = !self.state.screenshotsEnabled || self.shotEngine.isRunning
-            if self.engine.isRunning && shotReady { timer.invalidate() }
+            let retryReady = self.state.retryTrigger != .hotkey || self.retryEngine.isRunning
+            if self.engine.isRunning && shotReady && retryReady { timer.invalidate() }
         }
     }
 
@@ -337,7 +352,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Open the connection now, while there's speech still to come, so the
             // handshake isn't billed to the pause after the key is released.
             GeminiClient.prewarm(apiKey: state.apiKey, model: state.model)
-            startDraftIfEnabled()
             if state.playSounds { Sound.start() }
             startRecordTimer()
             refreshUI()
@@ -352,9 +366,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopAndTranscribe() {
         guard state.status == .recording else { return }
         stopRecordTimer()
-        // Recognition stops here; whatever it already typed stays on screen until
-        // Gemini's wording arrives to correct it.
-        liveTranscriber.stop()
         if state.playSounds { Sound.stop() }
         unmuteAudioIfMuted()
 
@@ -369,7 +380,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard result.duration >= minimumDuration else {
             try? FileManager.default.removeItem(at: result.url)
-            discardDraft() // clean up the character or two a draft may have typed
             state.status = .idle
             refreshUI()
             registerRetryTap()
@@ -392,12 +402,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let instruction = state.effectiveInstruction
         let thinkingBudget = state.thinkingBudget
         let url = result.url
-        // Stream + type-live only when we'd actually inject at the cursor and can
-        // (Accessibility granted). Otherwise use the plain one-shot request. A take
-        // that's drafting never streams: the draft already owns the cursor, and
-        // typing deltas on top of it would interleave two sources of text.
-        let stream = state.streamText && state.insertAtCursor
-            && Permissions.hasAccessibility() && !draftActive
 
         transcribeGeneration += 1
         let gen = transcribeGeneration
@@ -405,20 +409,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcribeTask = Task {
             let outcome: Result<TranscriptionResult, Error>
             do {
-                let result: TranscriptionResult
-                if stream {
-                    // Deltas arrive in order and are whitespace-safe; type each one as
-                    // it lands. Cancelling the task ends the stream, which stops typing.
-                    result = try await GeminiClient.transcribeStreaming(
-                        audioURL: url, apiKey: apiKey, model: model, instruction: instruction,
-                        thinkingBudget: thinkingBudget,
-                        onDelta: { TextInjector.typeUnicode($0) })
-                } else {
-                    result = try await GeminiClient.transcribe(
-                        audioURL: url, apiKey: apiKey, model: model, instruction: instruction,
-                        thinkingBudget: thinkingBudget)
-                }
-                outcome = .success(result)
+                outcome = .success(try await GeminiClient.transcribe(
+                    audioURL: url, apiKey: apiKey, model: model, instruction: instruction,
+                    thinkingBudget: thinkingBudget))
             } catch {
                 outcome = .failure(error)
             }
@@ -433,9 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // The audio outlives a successful take: it's what a retry
                     // (double-tap) re-sends. `rememberTake` owns deleting it.
                     self.state.recordUsage(input: result.inputTokens, output: result.outputTokens, model: model)
-                    if self.draftActive { self.handleDraftedTranscription(result.text, audioURL: url) }
-                    else if stream      { self.handleStreamedTranscription(result.text, audioURL: url) }
-                    else                { self.handleTranscription(result.text, audioURL: url) }
+                    self.handleTranscription(result.text, audioURL: url)
                 case .failure(let error):
                     try? FileManager.default.removeItem(at: url)
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -450,6 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Called for every take too short to transcribe. One tap is just an aborted
     /// take; a second within `retryTapWindow` is the gesture to redo the last one.
     private func registerRetryTap() {
+        guard state.retryTrigger == .doubleTap else { return }
         let now = Date()
         if let prev = lastTapAt, now.timeIntervalSince(prev) < retryTapWindow {
             lastTapAt = nil
@@ -459,11 +451,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Whether there is a take the user could still retry right now.
+    private var hasRetryableTake: Bool {
+        guard let take = lastTake else { return false }
+        return Date().timeIntervalSince(take.completedAt) < retryWindow
+    }
+
     /// Deletes what the last take put at the cursor and sends its audio back to
     /// Gemini for a second, more careful pass (the rejected text is quoted in the
     /// prompt and a small thinking budget is allowed, so the model actually
     /// reconsiders instead of reproducing the same output).
     private func retryLastTake() {
+        // The double-tap arrives at idle by construction, but the dedicated hotkey
+        // and the menu item can fire mid-recording or mid-transcription.
+        guard state.status.canStartRecording else { return }
         guard let take = lastTake,
               Date().timeIntervalSince(take.completedAt) < retryWindow else { return }
         lastTake = nil
@@ -526,12 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSPasteboard.general.setString(text, forType: .string)
         }
 
-        var inserted = false
-        if state.insertAtCursor, Permissions.hasAccessibility() {
-            TextInjector.deliver(text, typeInstead: state.typeInsteadOfPaste)
-            inserted = true
-        }
-
+        let inserted = insertAtCursor(text)
         rememberTake(text: text, audioURL: audioURL, inserted: inserted)
         state.status = .idle
         refreshUI()
@@ -554,10 +550,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the answer beside the thumbnail. Mirrors the transcription flow's watchdog
     /// and generation bookkeeping so cancel/reset work the same way.
     private func askGemini(about shotURL: URL, audioURL url: URL) {
-        // The spoken words are a question, not dictation — remove any live draft
-        // they may have typed at the cursor.
-        discardDraft()
-
         state.status = .transcribing
         refreshUI()
         // Image + audio + the model's default thinking is slower than plain
@@ -608,53 +600,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshUI()
     }
 
-    // MARK: On-device draft
-
-    /// Starts drafting only when the text would actually go somewhere — there's no
-    /// point recognizing on-device if we can't type the result at the cursor.
-    private func startDraftIfEnabled() {
-        typedDraft = ""
-        // An armed screenshot means this take is a spoken question, not dictation —
-        // nothing should be typed at the cursor.
-        draftActive = state.liveDraft
-            && state.insertAtCursor
-            && !(state.askScreenshots && shots.armedShotURL != nil)
-            && Permissions.hasAccessibility()
-            && LiveTranscriber.isAuthorized
-        if draftActive { liveTranscriber.start() }
-    }
-
-    /// Rewrites only the part of the on-screen draft that changed.
-    private func applyDraft(_ draft: String) {
-        guard draftActive, state.status == .recording else { return }
-        let edit = TextInjector.edit(from: typedDraft, to: draft)
-        guard edit.delete > 0 || !edit.insert.isEmpty else { return }
-        TextInjector.applyEdit(delete: edit.delete, insert: edit.insert)
-        typedDraft = draft
-    }
-
-    /// Removes the provisional text, for when the user explicitly discards a take.
-    private func discardDraft() {
-        liveTranscriber.stop()
-        if !typedDraft.isEmpty { TextInjector.deleteBackward(typedDraft.count) }
-        typedDraft = ""
-        draftActive = false
-    }
-
-    /// Leaves the provisional text in place but stops tracking it. Used when Gemini
-    /// fails: the on-device draft is still genuinely the user's words, and deleting
-    /// it would turn a degraded result into a total loss.
-    private func keepDraftAsIs() {
-        liveTranscriber.stop()
-        typedDraft = ""
-        draftActive = false
-    }
-
     /// Discards an in-progress recording without sending it to Gemini.
     private func cancelRecording() {
         guard state.status == .recording else { return }
         stopRecordTimer()
-        discardDraft()
         if let result = recorder.stop() {
             try? FileManager.default.removeItem(at: result.url)
         }
@@ -821,58 +770,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSPasteboard.general.setString(text, forType: .string)
         }
 
-        var inserted = false
-        if state.insertAtCursor {
-            if Permissions.hasAccessibility() {
-                TextInjector.deliver(text, typeInstead: state.typeInsteadOfPaste)
-                inserted = true
-            } else {
-                Permissions.requestAccessibility()
-                Notify.show("Accessibility needed to insert text",
-                            "Your transcription was copied to the clipboard. Enable Accessibility to auto-insert it.")
-            }
-        }
-
+        let inserted = insertAtCursor(text)
         rememberTake(text: text, audioURL: audioURL, inserted: inserted)
         state.status = .idle
         refreshUI()
     }
 
-    /// Finalizes a streamed transcription. The text was already typed at the cursor
-    /// as it streamed, so this only records it and refreshes the clipboard.
-    /// The draft is already on screen; correct it to Gemini's wording in place,
-    /// touching only the characters that actually differ.
-    private func handleDraftedTranscription(_ text: String, audioURL: URL) {
-        stopTranscribeWatchdog()
-        state.addRecent(text)
-        if state.copyToClipboard {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+    /// Puts `text` at the cursor when settings and the system allow it; returns
+    /// whether it was actually inserted. When secure input or a missing permission
+    /// blocks synthetic keystrokes, the text goes to the clipboard (even with the
+    /// clipboard setting off — it must not just vanish) and a notification says why.
+    private func insertAtCursor(_ text: String) -> Bool {
+        guard state.insertAtCursor else { return false }
+
+        func fallBackToClipboard(_ title: String, _ body: String) {
+            if !state.copyToClipboard {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+            Notify.show(title, body)
         }
 
-        let edit = TextInjector.edit(from: typedDraft, to: text)
-        TextInjector.applyEdit(delete: edit.delete, insert: edit.insert)
-        typedDraft = ""
-        draftActive = false
-
-        // After the correction the on-screen text is exactly `text`.
-        rememberTake(text: text, audioURL: audioURL, inserted: true)
-        state.status = .idle
-        refreshUI()
-    }
-
-    private func handleStreamedTranscription(_ text: String, audioURL: URL) {
-        stopTranscribeWatchdog()
-        state.addRecent(text)
-        if state.copyToClipboard {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+        if TextInjector.secureInputActive {
+            fallBackToClipboard("A password field is blocking insertion",
+                                "Secure input is on (a password field or secure app has the keyboard), so typed text would vanish. Your text is on the clipboard — paste it with ⌘V.")
+            return false
         }
-        // The typed deltas add up to exactly `text` (leading/trailing whitespace
-        // never streams), so that's what a retry would need to take back.
-        rememberTake(text: text, audioURL: audioURL, inserted: true)
-        state.status = .idle
-        refreshUI()
+        guard Permissions.hasAccessibility() else {
+            Permissions.requestAccessibility()
+            fallBackToClipboard("Accessibility needed to insert text",
+                                "Your transcription is on the clipboard. Enable Accessibility to auto-insert it.")
+            return false
+        }
+        TextInjector.deliver(text, typeInstead: state.typeInsteadOfPaste)
+        return true
     }
 
     private func handleError(_ message: String, title: String = "Transcription failed") {
@@ -949,6 +880,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.status == .recording { stopAndTranscribe() }
         else if state.status.canStartRecording { startRecording() }
     }
+
+    @objc private func retryFromMenu() { retryLastTake() }
 
     @objc private func cancelFromMenu() {
         switch state.status {

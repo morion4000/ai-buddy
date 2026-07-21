@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 
 /// Inserts transcribed text into whatever app is focused.
@@ -10,6 +11,13 @@ import CoreGraphics
 ///
 /// Both require the Accessibility permission (to post synthetic events).
 enum TextInjector {
+    /// True while some app holds macOS secure event input — a focused password
+    /// field, a password manager, some terminals. Synthetic keystrokes (typing,
+    /// ⌘V, backspace) are silently swallowed in that state, with no error at
+    /// all, so callers must check this and fall back to the clipboard instead
+    /// of letting the text vanish.
+    static var secureInputActive: Bool { IsSecureEventInputEnabled() }
+
     static func deliver(_ text: String, typeInstead: Bool) {
         if typeInstead { typeUnicode(text) } else { paste(text) }
     }
@@ -25,10 +33,20 @@ enum TextInjector {
         // Mark transient so well-behaved clipboard managers skip the temporary value.
         item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
         pb.writeObjects([item])
+        let ourChange = pb.changeCount
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             sendCommandV()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { restore(saved) }
+            // Restore only after the target app has had generous time to service
+            // the ⌘V, and only while the pasteboard still holds our transient item
+            // (changeCount unchanged). The old fixed 200 ms timer raced busy apps
+            // into pasting the restored OLD clipboard instead of the dictation;
+            // the changeCount guard also keeps us from stomping anything the user
+            // copied in the meantime.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                guard pb.changeCount == ourChange else { return }
+                restore(saved)
+            }
         }
     }
 
@@ -87,28 +105,7 @@ enum TextInjector {
         }
     }
 
-    // MARK: Incremental correction
-
-    /// The edit that turns `typed` into `target`: how many characters to remove
-    /// from the end, then what to type in their place.
-    ///
-    /// Text already on screen gets revised — the on-device draft rewrites its own
-    /// tail as it hears more, and Gemini's final wording differs again. Retyping
-    /// everything each time would make the cursor thrash, so the shared prefix is
-    /// kept and only the part that actually changed is rewritten, which is usually
-    /// the last word or two.
-    static func edit(from typed: String, to target: String) -> (delete: Int, insert: String) {
-        let old = Array(typed), new = Array(target)
-        var shared = 0
-        while shared < old.count, shared < new.count, old[shared] == new[shared] { shared += 1 }
-        return (old.count - shared, String(new[shared...]))
-    }
-
-    /// Deletes backwards then types, both on the serial queue so they land in order.
-    static func applyEdit(delete: Int, insert: String) {
-        deleteBackward(delete)
-        if !insert.isEmpty { typeUnicode(insert) }
-    }
+    // MARK: Deletion (the retry gesture takes back what a take inserted)
 
     /// Virtual keycode 51 is Delete (backspace). One press removes one character in
     /// every text field we can reach, so the count is in characters, not bytes.
