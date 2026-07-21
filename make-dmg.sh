@@ -151,6 +151,31 @@ EOF
 
   echo "  ✓ feed live: $FEED_BASE/appcast.json → $VERSION"
   echo "    installed apps will offer the update on their next daily check"
+
+  # Mirror the release on GitHub — tag the exact commit this build came from
+  # and attach the DMG — so every published version is traceable in history.
+  echo "▸ Tagging v$VERSION and creating the GitHub release…"
+  if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+    echo "  ! working tree has uncommitted changes — tagging HEAD anyway, but the"
+    echo "    tag may not match the built app. Commit before releasing next time."
+  fi
+  if git -C "$ROOT" rev-parse "v$VERSION" >/dev/null 2>&1; then
+    echo "  • tag v$VERSION already exists — leaving it as-is"
+  else
+    git -C "$ROOT" tag "v$VERSION"
+    git -C "$ROOT" push origin "v$VERSION"
+  fi
+  GH_ASSET="$BUILD/AI-Buddy-$VERSION.dmg"
+  cp "$DMG" "$GH_ASSET"
+  if gh release view "v$VERSION" -R "$(git -C "$ROOT" remote get-url origin)" >/dev/null 2>&1; then
+    echo "  • GitHub release v$VERSION already exists — leaving it as-is"
+  else
+    NOTES_ARGS=(--generate-notes)
+    [[ -n "${RELEASE_NOTES:-}" ]] && NOTES_ARGS=(--notes "$RELEASE_NOTES")
+    gh release create "v$VERSION" "$GH_ASSET" --title "$APP_NAME $VERSION" "${NOTES_ARGS[@]}"
+    echo "  ✓ github release v$VERSION created"
+  fi
+  rm -f "$GH_ASSET"
 fi
 
 echo ""

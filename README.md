@@ -48,7 +48,7 @@ keychain, both the app and the DMG are signed with it automatically.
 |---|---|
 | `SKIP_BUILD=1` | Reuse the existing `build/AI Buddy.app` instead of rebuilding. |
 | `NOTARIZE=1` | Submit the DMG to Apple's notary service and staple the ticket. |
-| `RELEASE=1` | Publish the DMG + appcast to the auto-update feed (requires `NOTARIZE=1`). |
+| `RELEASE=1` | Publish the DMG + appcast to the auto-update feed, tag `v<version>`, and create a GitHub release (requires `NOTARIZE=1`). |
 | `RELEASE_NOTES` | Optional release notes shown in the in-app update prompt. |
 | `NOTARY_PROFILE` | notarytool credential profile to use (default `AI Buddy`). |
 | `SIGN_IDENTITY` | Force a specific signing identity. |
