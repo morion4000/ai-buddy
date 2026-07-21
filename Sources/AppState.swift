@@ -152,6 +152,22 @@ final class AppState: ObservableObject {
     no intelligible question, briefly describe what the screenshot shows instead.
     """
 
+    /// Appended when the user rejects a take (double-tap of the hotkey) and the
+    /// same audio goes back for a second pass. Quoting the rejected attempt is what
+    /// makes the retry useful — transcription runs at temperature 0, so without it
+    /// the model would mostly just reproduce the same text.
+    static func retryDirective(previous: String) -> String {
+        """
+        A previous transcription of this exact audio was rejected by the user as inaccurate. \
+        That rejected attempt was:
+        "\(previous)"
+        Listen to the audio again more carefully and produce a corrected transcription. \
+        Reconsider words that could plausibly have been misheard — names, technical terms, \
+        and words the rejected attempt may have guessed at — and do not simply repeat the \
+        rejected attempt unless you are confident it is exactly right.
+        """
+    }
+
     /// Appended to the prompt when "Remove filler words" is on. Phrased to drop
     /// only non-lexical fillers, not real words, and to tidy the result.
     static let fillerDirective = """
@@ -326,6 +342,18 @@ final class AppState: ObservableObject {
         var updated = recents
         updated.insert(TranscriptItem(text: text, date: Date()), at: 0)
         recents = Array(updated.prefix(AppState.maxSavedTranscriptions))
+    }
+
+    /// Swaps the entry a retry replaced (normally the newest) for the corrected
+    /// text, so the history doesn't keep the rejected wording around.
+    func replaceRecent(matching old: String, with text: String) {
+        var updated = recents
+        if let i = updated.firstIndex(where: { $0.text == old }) {
+            updated[i] = TranscriptItem(text: text, date: Date())
+            recents = updated
+        } else {
+            addRecent(text)
+        }
     }
 
     func clearRecents() {

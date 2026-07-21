@@ -212,6 +212,8 @@ struct SettingsView: View {
                  ? "Hold the hotkey while you speak, then release to transcribe. A single modifier key like Right ⌥ works great here."
                  : "Press once to start listening, press again to stop and transcribe.")
                 .font(.caption2).foregroundStyle(.secondary)
+            Text("Got a bad result? Double-tap the hotkey within 30 seconds: the inserted text is deleted and the same audio goes back to Gemini for a more careful second pass.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 

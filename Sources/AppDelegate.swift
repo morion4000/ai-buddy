@@ -38,6 +38,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let minimumDuration: TimeInterval = 0.3
 
+    /// Everything needed to redo the last completed dictation: the audio it came
+    /// from, the text Gemini produced, and exactly what was put on screen so the
+    /// retry can take it back before replacing it.
+    private struct RetryableTake {
+        let audioURL: URL
+        let text: String
+        let insertedCount: Int
+        let completedAt: Date
+    }
+    /// The most recent completed take, kept (audio included) so a double-tap of
+    /// the hotkey can delete its text and send the same audio back to Gemini.
+    private var lastTake: RetryableTake?
+    /// When the last sub-`minimumDuration` take ended — two of those in quick
+    /// succession are the retry gesture, not two failed dictations.
+    private var lastTapAt: Date?
+    private let retryTapWindow: TimeInterval = 0.8
+    /// After this long the inserted text is no longer plausibly "just landed" —
+    /// the cursor has almost certainly moved on, so deleting behind it is unsafe.
+    private let retryWindow: TimeInterval = 30
+
     // No-audio detection: if the mic produces nothing above `silenceThreshold` dBFS
     // within `silenceGrace` seconds of starting, assume it's muted/off and bail out
     // with an error rather than letting the user talk into silence. The threshold sits
@@ -349,8 +369,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard result.duration >= minimumDuration else {
             try? FileManager.default.removeItem(at: result.url)
+            discardDraft() // clean up the character or two a draft may have typed
             state.status = .idle
             refreshUI()
+            registerRetryTap()
             return
         }
 
@@ -400,22 +422,130 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 outcome = .failure(error)
             }
-            try? FileManager.default.removeItem(at: url)
             await MainActor.run { [weak self] in
                 // Drop a result the watchdog or a manual reset already moved past.
-                guard let self, gen == self.transcribeGeneration else { return }
+                guard let self, gen == self.transcribeGeneration else {
+                    try? FileManager.default.removeItem(at: url)
+                    return
+                }
                 switch outcome {
                 case .success(let result):
+                    // The audio outlives a successful take: it's what a retry
+                    // (double-tap) re-sends. `rememberTake` owns deleting it.
                     self.state.recordUsage(input: result.inputTokens, output: result.outputTokens, model: model)
-                    if self.draftActive { self.handleDraftedTranscription(result.text) }
-                    else if stream      { self.handleStreamedTranscription(result.text) }
-                    else                { self.handleTranscription(result.text) }
+                    if self.draftActive { self.handleDraftedTranscription(result.text, audioURL: url) }
+                    else if stream      { self.handleStreamedTranscription(result.text, audioURL: url) }
+                    else                { self.handleTranscription(result.text, audioURL: url) }
                 case .failure(let error):
+                    try? FileManager.default.removeItem(at: url)
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.handleError(message)
                 }
             }
         }
+    }
+
+    // MARK: Retry (double-tap the hotkey to redo the last take)
+
+    /// Called for every take too short to transcribe. One tap is just an aborted
+    /// take; a second within `retryTapWindow` is the gesture to redo the last one.
+    private func registerRetryTap() {
+        let now = Date()
+        if let prev = lastTapAt, now.timeIntervalSince(prev) < retryTapWindow {
+            lastTapAt = nil
+            retryLastTake()
+        } else {
+            lastTapAt = now
+        }
+    }
+
+    /// Deletes what the last take put at the cursor and sends its audio back to
+    /// Gemini for a second, more careful pass (the rejected text is quoted in the
+    /// prompt and a small thinking budget is allowed, so the model actually
+    /// reconsiders instead of reproducing the same output).
+    private func retryLastTake() {
+        guard let take = lastTake,
+              Date().timeIntervalSince(take.completedAt) < retryWindow else { return }
+        lastTake = nil
+
+        if take.insertedCount > 0, Permissions.hasAccessibility() {
+            TextInjector.deleteBackward(take.insertedCount)
+        }
+
+        state.status = .transcribing
+        refreshUI()
+        startTranscribeWatchdog()
+
+        let apiKey = state.apiKey
+        let model = state.model
+        let instruction = state.effectiveInstruction + "\n\n" + AppState.retryDirective(previous: take.text)
+        let url = take.audioURL
+
+        transcribeGeneration += 1
+        let gen = transcribeGeneration
+        transcribeTask?.cancel()
+        transcribeTask = Task {
+            let outcome: Result<TranscriptionResult, Error>
+            do {
+                outcome = .success(try await GeminiClient.transcribe(
+                    audioURL: url, apiKey: apiKey, model: model, instruction: instruction,
+                    thinkingBudget: AppState.smallThinkingBudget))
+            } catch {
+                outcome = .failure(error)
+            }
+            await MainActor.run { [weak self] in
+                guard let self, gen == self.transcribeGeneration else {
+                    try? FileManager.default.removeItem(at: url)
+                    return
+                }
+                switch outcome {
+                case .success(let result):
+                    self.state.recordUsage(input: result.inputTokens, output: result.outputTokens, model: model)
+                    self.handleRetriedTranscription(result.text, replacing: take, audioURL: url)
+                case .failure(let error):
+                    // The rejected text is already deleted, so there's nothing to
+                    // take back — keep the audio so another double-tap can retry.
+                    self.lastTake = RetryableTake(audioURL: url, text: take.text,
+                                                  insertedCount: 0, completedAt: Date())
+                    let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.handleError(message, title: "Retry failed")
+                }
+            }
+        }
+    }
+
+    /// Lands the corrected text the same way a fresh take would, and swaps it into
+    /// the history in place of the rejected wording. Kept retryable itself, so the
+    /// user can double-tap again if the second attempt is still wrong.
+    private func handleRetriedTranscription(_ text: String, replacing take: RetryableTake, audioURL: URL) {
+        stopTranscribeWatchdog()
+        state.replaceRecent(matching: take.text, with: text)
+
+        if state.copyToClipboard {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+
+        var inserted = false
+        if state.insertAtCursor, Permissions.hasAccessibility() {
+            TextInjector.deliver(text, typeInstead: state.typeInsteadOfPaste)
+            inserted = true
+        }
+
+        rememberTake(text: text, audioURL: audioURL, inserted: inserted)
+        state.status = .idle
+        refreshUI()
+    }
+
+    /// Retains a completed take for the retry gesture, releasing the one it
+    /// replaces (and that take's audio file) in the process.
+    private func rememberTake(text: String, audioURL: URL, inserted: Bool) {
+        if let old = lastTake, old.audioURL != audioURL {
+            try? FileManager.default.removeItem(at: old.audioURL)
+        }
+        lastTake = RetryableTake(audioURL: audioURL, text: text,
+                                 insertedCount: inserted ? text.count : 0,
+                                 completedAt: Date())
     }
 
     // MARK: Voice questions about a screenshot
@@ -682,7 +812,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ])
     }
 
-    private func handleTranscription(_ text: String) {
+    private func handleTranscription(_ text: String, audioURL: URL) {
         stopTranscribeWatchdog()
         state.addRecent(text)
 
@@ -691,9 +821,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSPasteboard.general.setString(text, forType: .string)
         }
 
+        var inserted = false
         if state.insertAtCursor {
             if Permissions.hasAccessibility() {
                 TextInjector.deliver(text, typeInstead: state.typeInsteadOfPaste)
+                inserted = true
             } else {
                 Permissions.requestAccessibility()
                 Notify.show("Accessibility needed to insert text",
@@ -701,6 +833,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        rememberTake(text: text, audioURL: audioURL, inserted: inserted)
         state.status = .idle
         refreshUI()
     }
@@ -709,7 +842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// as it streamed, so this only records it and refreshes the clipboard.
     /// The draft is already on screen; correct it to Gemini's wording in place,
     /// touching only the characters that actually differ.
-    private func handleDraftedTranscription(_ text: String) {
+    private func handleDraftedTranscription(_ text: String, audioURL: URL) {
         stopTranscribeWatchdog()
         state.addRecent(text)
         if state.copyToClipboard {
@@ -722,17 +855,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         typedDraft = ""
         draftActive = false
 
+        // After the correction the on-screen text is exactly `text`.
+        rememberTake(text: text, audioURL: audioURL, inserted: true)
         state.status = .idle
         refreshUI()
     }
 
-    private func handleStreamedTranscription(_ text: String) {
+    private func handleStreamedTranscription(_ text: String, audioURL: URL) {
         stopTranscribeWatchdog()
         state.addRecent(text)
         if state.copyToClipboard {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
         }
+        // The typed deltas add up to exactly `text` (leading/trailing whitespace
+        // never streams), so that's what a retry would need to take back.
+        rememberTake(text: text, audioURL: audioURL, inserted: true)
         state.status = .idle
         refreshUI()
     }
