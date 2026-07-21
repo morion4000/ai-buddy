@@ -41,6 +41,7 @@ struct SettingsView: View {
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     private let modelPresets = [
+        "gemini-3.6-flash",
         "gemini-3.5-flash",
         "gemini-2.5-flash",
         "gemini-3-flash-preview",

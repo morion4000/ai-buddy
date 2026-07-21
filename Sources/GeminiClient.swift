@@ -35,12 +35,13 @@ enum GeminiPricing {
     private static let builtin: [String: (input: Double, output: Double)] = [
         "gemini-2.5-flash":       (1.00, 2.50),
         "gemini-2.5-flash-lite":  (0.30, 0.40),
+        "gemini-3.6-flash":       (1.50, 7.50),
         "gemini-3.5-flash":       (1.50, 9.00),
         "gemini-3-flash-preview": (1.00, 3.00),
         "gemini-3.1-flash-lite":  (0.50, 1.50),
         "gemini-2.0-flash":       (0.70, 0.40),
         "gemini-2.0-flash-lite":  (0.075, 0.30),
-        "gemini-flash-latest":    (1.50, 9.00), // tracks newest stable Flash (currently 3.5)
+        "gemini-flash-latest":    (1.50, 7.50), // tracks newest stable Flash (currently 3.6)
     ]
 
     private static let feedURL = URL(string: "https://updates.claudete.co/ai-buddy/pricing.json")!
