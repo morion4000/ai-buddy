@@ -2,31 +2,31 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>AI Buddy</string>
-    <key>CFBundleDisplayName</key>
-    <string>AI Buddy</string>
-    <key>CFBundleExecutable</key>
-    <string>AIBuddy</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.morion4000.gemini-dictation</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.5</string>
-    <key>CFBundleVersion</key>
-    <string>6</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>26.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>AI Buddy records your voice so Gemini can transcribe it to text.</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>© 2026</string>
+	<key>CFBundleDisplayName</key>
+	<string>AI Buddy</string>
+	<key>CFBundleExecutable</key>
+	<string>AIBuddy</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.morion4000.gemini-dictation</string>
+	<key>CFBundleName</key>
+	<string>AI Buddy</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.6</string>
+	<key>CFBundleVersion</key>
+	<string>7</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AI Buddy records your voice so Gemini can transcribe it to text.</string>
 </dict>
 </plist>

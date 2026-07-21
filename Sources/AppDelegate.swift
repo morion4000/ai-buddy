@@ -73,6 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.apiKey.isEmpty || !Permissions.hasInputMonitoring() {
             openSettings(nil)
         }
+
+        // Delay the daily update check so launch stays instant and any prompt
+        // doesn't collide with first-run setup.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            MainActor.assumeIsolated { Updater.shared.checkAutomatically() }
+        }
     }
 
     // MARK: Menu bar
@@ -180,6 +186,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let aboutMI = NSMenuItem(title: "About AI Buddy", action: #selector(showAbout), keyEquivalent: "")
         aboutMI.target = self
         menu.addItem(aboutMI)
+
+        let updateMI = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        updateMI.target = self
+        menu.addItem(updateMI)
 
         let quitMI = NSMenuItem(title: "Quit AI Buddy", action: #selector(quit), keyEquivalent: "q")
         quitMI.target = self
@@ -716,6 +726,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn, let websiteURL {
             NSWorkspace.shared.open(websiteURL)
         }
+    }
+
+    @objc private func checkForUpdates() {
+        // Menu actions always arrive on the main thread.
+        MainActor.assumeIsolated { Updater.shared.check(userInitiated: true) }
     }
 
     @objc private func quit() { NSApp.terminate(nil) }

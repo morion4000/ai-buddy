@@ -5,6 +5,14 @@
 #   ./make-dmg.sh                    # builds the app, then makes build/AI Buddy.dmg
 #   SKIP_BUILD=1 ./make-dmg.sh       # reuse the existing build/AI Buddy.app
 #   NOTARIZE=1 ./make-dmg.sh         # also notarize + staple the DMG (needs creds, see below)
+#   NOTARIZE=1 RELEASE=1 ./make-dmg.sh   # …and publish it to the auto-update feed
+#
+# RELEASE=1 feeds the in-app auto-updater: it uploads the DMG plus an
+# appcast.json to the updates.claudete.co R2 bucket (the same one Claudete
+# publishes to), which installed apps poll daily. R2 credentials are sourced
+# from .env.notarize here or, failing that, from ../claudete/.env.notarize.
+# Every public build should ship through it (and be notarized, or the update
+# will fail Gatekeeper on users' Macs).
 #
 # The DMG contains the .app plus an /Applications symlink, so users just drag
 # AI Buddy onto Applications to install. If a Developer ID identity is found the
@@ -88,6 +96,59 @@ if [[ "${NOTARIZE:-}" == "1" ]]; then
   echo "▸ Stapling ticket…"
   xcrun stapler staple "$DMG"
   echo "  ✓ notarized & stapled"
+fi
+
+if [[ "${RELEASE:-}" == "1" ]]; then
+  if [[ "${NOTARIZE:-}" != "1" ]]; then
+    echo "✗ Refusing to publish an un-notarized DMG — rerun with NOTARIZE=1 RELEASE=1." >&2
+    exit 1
+  fi
+
+  # R2 credentials: local .env.notarize wins, else borrow Claudete's.
+  ENV_FILE=""
+  for candidate in "$ROOT/.env.notarize" "$ROOT/../claudete/.env.notarize"; do
+    [[ -f "$candidate" ]] && ENV_FILE="$candidate" && break
+  done
+  if [[ -z "$ENV_FILE" ]]; then
+    echo "✗ No .env.notarize with R2 credentials found (looked in this repo and ../claudete)." >&2
+    exit 1
+  fi
+  set -a; source "$ENV_FILE"; set +a
+  : "${CF_ACCOUNT_ID:?missing in $ENV_FILE}" "${CF_ACCESS_KEY_ID:?missing in $ENV_FILE}" \
+    "${CF_SECRET_ACCESS_KEY:?missing in $ENV_FILE}" "${R2_BUCKET:?missing in $ENV_FILE}"
+
+  VERSION="$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$ROOT/Info.plist")"
+  DMG_NAME="AI-Buddy-$VERSION.dmg"
+  FEED_BASE="https://updates.claudete.co/ai-buddy"
+  R2_BASE="https://$CF_ACCOUNT_ID.r2.cloudflarestorage.com/$R2_BUCKET/ai-buddy"
+
+  # Refuse to overwrite a published version: the DMG name is immutable-cached,
+  # so re-releasing the same version would serve stale bits to some users.
+  if curl -sf -o /dev/null -I "$FEED_BASE/$DMG_NAME"; then
+    echo "✗ $DMG_NAME is already published — bump the version in Info.plist first." >&2
+    exit 1
+  fi
+
+  echo "▸ Publishing $DMG_NAME to the update feed…"
+  r2_put() {  # r2_put <local-file> <remote-name> <content-type> <cache-control>
+    curl -sfS --aws-sigv4 "aws:amz:auto:s3" \
+      --user "$CF_ACCESS_KEY_ID:$CF_SECRET_ACCESS_KEY" \
+      -T "$1" -H "Content-Type: $3" -H "Cache-Control: $4" \
+      "$R2_BASE/$2"
+  }
+  r2_put "$DMG" "$DMG_NAME" "application/x-apple-diskimage" "public, max-age=31536000, immutable"
+
+  # The appcast is the mutable pointer the app polls — never edge-cache it stale.
+  APPCAST="$BUILD/appcast.json"
+  NOTES="${RELEASE_NOTES:-}"
+  python3 - "$VERSION" "$FEED_BASE/$DMG_NAME" "$NOTES" > "$APPCAST" <<'EOF'
+import json, sys
+print(json.dumps({"version": sys.argv[1], "url": sys.argv[2], "notes": sys.argv[3]}, indent=2))
+EOF
+  r2_put "$APPCAST" "appcast.json" "application/json" "no-cache, max-age=0, must-revalidate"
+
+  echo "  ✓ feed live: $FEED_BASE/appcast.json → $VERSION"
+  echo "    installed apps will offer the update on their next daily check"
 fi
 
 echo ""

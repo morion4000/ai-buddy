@@ -48,8 +48,34 @@ keychain, both the app and the DMG are signed with it automatically.
 |---|---|
 | `SKIP_BUILD=1` | Reuse the existing `build/AI Buddy.app` instead of rebuilding. |
 | `NOTARIZE=1` | Submit the DMG to Apple's notary service and staple the ticket. |
+| `RELEASE=1` | Publish the DMG + appcast to the auto-update feed (requires `NOTARIZE=1`). |
+| `RELEASE_NOTES` | Optional release notes shown in the in-app update prompt. |
 | `NOTARY_PROFILE` | notarytool credential profile to use (default `AI Buddy`). |
 | `SIGN_IDENTITY` | Force a specific signing identity. |
+
+### Auto-updates
+
+The app updates itself from a JSON appcast at
+`https://updates.claudete.co/ai-buddy/appcast.json` (the same public R2 bucket
+Claudete's updater uses). Once a day (and via **Check for Updates…** in the menu) the app
+compares the feed's version against its own; when a newer one exists it offers
+to install, then downloads the DMG, verifies the new app is signed by the same
+Developer ID team, swaps the bundle in place, and relaunches.
+
+To ship an update: bump `CFBundleShortVersionString` in `Info.plist`, commit,
+then run:
+
+```bash
+NOTARIZE=1 RELEASE=1 ./make-dmg.sh
+```
+
+This uploads `AI-Buddy-<version>.dmg` and a refreshed `appcast.json` to the
+bucket (credentials from `.env.notarize`, falling back to
+`../claudete/.env.notarize`). Optionally set `RELEASE_NOTES="…"` to show notes
+in the update prompt.
+
+Unsigned/dev builds refuse to auto-install updates (there's no team identity to
+verify against) and point at the download page instead.
 
 ### Notarizing for distribution
 
@@ -170,3 +196,11 @@ changes every build, so it may ask you to re-grant Microphone / Input Monitoring
 - **`Gemini API error 400/404`** → check the model id, or that your key has the
   Gemini API enabled. `429` means you've hit a rate limit.
 - **No text came back** → likely no intelligible speech was detected.
+
+## License
+
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md):
+you're welcome to read, build, and modify AI Buddy for personal, noncommercial
+use, but commercial use and redistribution aren't permitted. For the ready-made
+signed, notarized, auto-updating build, see
+[claudete.co/ai-buddy](https://claudete.co/ai-buddy).
