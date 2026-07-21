@@ -158,7 +158,7 @@ struct SettingsView: View {
                     }
                     .frame(width: 100)
                 }
-                Text("Any audio-capable Gemini model works. gemini-3.5-flash is the default; gemini-2.5-flash-lite is faster and cheaper for simple dictation.")
+                Text("Any audio-capable Gemini model works. gemini-3.6-flash is the default; gemini-2.5-flash-lite is faster and cheaper for simple dictation.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 2) {

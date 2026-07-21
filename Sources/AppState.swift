@@ -161,6 +161,7 @@ final class AppState: ObservableObject {
         static let languages = "languages"
         static let enableThinking = "enableThinking"
         static let modelMigrated35 = "modelDefault35Migrated"
+        static let modelMigrated36 = "modelDefault36Migrated"
         static let shotEnabled = "screenshotsEnabled", shotKey = "screenshotKeyCode", shotMods = "screenshotMods"
         static let askScreenshots = "askScreenshots"
         static let retryTrigger = "retryTrigger", retryKey = "retryKeyCode", retryMods = "retryMods"
@@ -298,7 +299,7 @@ final class AppState: ObservableObject {
 
     init() {
         apiKey      = Keychain.get() ?? ""
-        model       = d.string(forKey: K.model) ?? "gemini-3.5-flash"
+        model       = d.string(forKey: K.model) ?? "gemini-3.6-flash"
         triggerMode = TriggerMode(rawValue: d.string(forKey: K.triggerMode) ?? "") ?? .hold
 
         if d.bool(forKey: K.configured) {
@@ -363,6 +364,14 @@ final class AppState: ObservableObject {
             if model == "gemini-2.5-flash" { model = "gemini-3.5-flash" }
             d.set(model, forKey: K.model)
             d.set(true, forKey: K.modelMigrated35)
+        }
+
+        // Same one-time bump for the 3.6 default: still-on-3.5-default users move to
+        // gemini-3.6-flash (newer, and cheaper on output: $7.50 vs $9.00 per 1M).
+        if !d.bool(forKey: K.modelMigrated36) {
+            if model == "gemini-3.5-flash" { model = "gemini-3.6-flash" }
+            d.set(model, forKey: K.model)
+            d.set(true, forKey: K.modelMigrated36)
         }
     }
 
