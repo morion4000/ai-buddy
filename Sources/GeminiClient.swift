@@ -174,6 +174,66 @@ enum GeminiClient {
         return TranscriptionResult(text: trimmed, inputTokens: usage.input, outputTokens: usage.output)
     }
 
+    /// Applies a spoken amendment to the previous take: one call carrying the
+    /// original dictation (ground truth), and the amendment audio (the change to
+    /// make); the full revised text comes back. A small thinking budget is worth
+    /// it here — merging an edit into existing wording is real reasoning.
+    static func amend(originalAudioURL: URL,
+                      amendAudioURL: URL,
+                      apiKey: String,
+                      model: String,
+                      instruction: String,
+                      thinkingBudget: Int,
+                      mimeType: String = AudioFormat.mimeType) async throws -> TranscriptionResult {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw GeminiError.noKey }
+
+        let original = try Data(contentsOf: originalAudioURL)
+        let amendment = try Data(contentsOf: amendAudioURL)
+        let modelID = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(modelID):generateContent"
+        guard let url = URL(string: endpoint) else { throw GeminiError.badResponse }
+
+        func makeBody(thinking: Bool) throws -> Data {
+            var gen = generationConfig(thinkingBudget: thinkingBudget)
+            if !thinking { gen.removeValue(forKey: "thinkingConfig") }
+            let body: [String: Any] = [
+                "contents": [[
+                    "parts": [
+                        ["text": instruction],
+                        ["inline_data": ["mime_type": mimeType, "data": original.base64EncodedString()]],
+                        ["inline_data": ["mime_type": mimeType, "data": amendment.base64EncodedString()]],
+                    ]
+                ]],
+                "generationConfig": gen,
+            ]
+            return try JSONSerialization.data(withJSONObject: body)
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 60
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+        req.httpBody = try makeBody(thinking: true)
+
+        let data: Data
+        do {
+            data = try await send(req, retries: 2)
+        } catch let GeminiError.http(code, _) where code == 400 {
+            // Same generic-400 dance as transcription: a model that dislikes our
+            // thinking config gets one retry with its own defaults.
+            req.httpBody = try makeBody(thinking: false)
+            data = try await send(req, retries: 2)
+        }
+
+        guard let text = extractText(from: data) else { throw GeminiError.empty }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { throw GeminiError.empty }
+        let usage = extractUsage(from: data)
+        return TranscriptionResult(text: trimmed, inputTokens: usage.input, outputTokens: usage.output)
+    }
+
     /// Answers a spoken question about a screenshot: one `generateContent` call
     /// carrying the instruction, the PNG, and the recorded audio, so the question
     /// never needs a separate transcription round-trip.

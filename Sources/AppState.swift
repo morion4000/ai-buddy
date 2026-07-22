@@ -187,6 +187,22 @@ final class AppState: ObservableObject {
     no intelligible question, briefly describe what the screenshot shows instead.
     """
 
+    /// The prompt for the amend gesture (tap, then hold and speak the change).
+    /// The model hears the original dictation AND the change request, plus the
+    /// previous transcription as text, and outputs the full revised text.
+    static func amendInstruction(previous: String) -> String {
+        """
+        You are revising a dictated transcription. The first audio attachment is the user's \
+        original dictation, which was transcribed as:
+        "\(previous)"
+        The second audio attachment is a spoken amendment: an instruction to change, add, or \
+        remove something — or replacement wording. Apply that amendment to the transcription \
+        and output ONLY the full revised text — no preamble, no quotation marks, no commentary, \
+        and no explanation of what changed. Keep everything the amendment does not touch exactly \
+        as it was, including its language, punctuation, and capitalization style.
+        """
+    }
+
     /// Appended when the user rejects a take (double-tap of the hotkey) and the
     /// same audio goes back for a second pass. Quoting the rejected attempt is what
     /// makes the retry useful — transcription runs at temperature 0, so without it

@@ -47,6 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// When the last sub-`minimumDuration` take ended — two of those in quick
     /// succession are the retry gesture, not two failed dictations.
     private var lastTapAt: Date?
+    /// Set at record start when a clean tap immediately preceded this press —
+    /// the take being recorded is a spoken AMENDMENT to this base take (tap,
+    /// then hold), not fresh dictation. The second press's length is what
+    /// separates the gestures: tap-tap redoes, tap-hold amends.
+    private var amendTake: RetryableTake?
     private let retryTapWindow: TimeInterval = 0.8
     /// After this long the inserted text is no longer plausibly "just landed" —
     /// the cursor has almost certainly moved on, so deleting behind it is unsafe.
@@ -237,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func menuStatusText() -> String {
         switch state.status {
         case .idle:         return "Idle"
-        case .recording:    return "● Listening…"
+        case .recording:    return amendTake != nil ? "● Listening (amend)…" : "● Listening…"
         case .transcribing: return "Transcribing…"
         case .error:        return "Last attempt failed"
         }
@@ -346,6 +351,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if state.muteWhileRecording { audioRestore = SystemAudio.mute() }
 
+        // A clean tap just before this press arms an amend for the take that's
+        // about to record. Armed only — it becomes one on release, if held long
+        // enough; a second quick tap falls into the double-tap retry instead.
+        if state.retryTrigger != .off, hasRetryableTake,
+           let tap = lastTapAt, Date().timeIntervalSince(tap) < retryTapWindow {
+            amendTake = lastTake
+        } else {
+            amendTake = nil
+        }
+
         do {
             try recorder.start()
             state.status = .recording
@@ -380,6 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard result.duration >= minimumDuration else {
             try? FileManager.default.removeItem(at: result.url)
+            amendTake = nil // it was a tap, not a held amendment
             state.status = .idle
             refreshUI()
             registerRetryTap()
@@ -389,7 +405,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A screenshot armed for a voice question turns this take into a question
         // about that shot instead of a dictation.
         if state.askScreenshots, let shotURL = shots.armedShotURL {
+            amendTake = nil
             askGemini(about: shotURL, audioURL: result.url)
+            return
+        }
+
+        // Tap-then-hold: this take is a spoken change to the last transcription.
+        if let base = amendTake {
+            amendTake = nil
+            lastTapAt = nil
+            amendLastTake(base, amendAudioURL: result.url)
             return
         }
 
@@ -439,11 +464,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Retry (double-tap the hotkey to redo the last take)
 
     /// Called for every take too short to transcribe. One tap is just an aborted
-    /// take; a second within `retryTapWindow` is the gesture to redo the last one.
+    /// take (and the possible start of tap-then-hold amend); a second tap within
+    /// `retryTapWindow` is the double-tap retry gesture.
     private func registerRetryTap() {
-        guard state.retryTrigger == .doubleTap else { return }
+        guard state.retryTrigger != .off else { return }
         let now = Date()
-        if let prev = lastTapAt, now.timeIntervalSince(prev) < retryTapWindow {
+        if state.retryTrigger == .doubleTap,
+           let prev = lastTapAt, now.timeIntervalSince(prev) < retryTapWindow {
             lastTapAt = nil
             retryLastTake()
         } else {
@@ -510,6 +537,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                   insertedCount: 0, completedAt: Date())
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.handleError(message, title: "Retry failed")
+                }
+            }
+        }
+    }
+
+    /// Tap-then-hold: sends the base take's audio plus the just-recorded spoken
+    /// amendment, deletes the base's on-screen text, and lands the revised text in
+    /// its place. The base's ORIGINAL audio stays retained afterwards, so amends
+    /// can chain — each one revises the latest text against the same dictation.
+    private func amendLastTake(_ base: RetryableTake, amendAudioURL: URL) {
+        lastTake = nil
+
+        if base.insertedCount > 0, Permissions.hasAccessibility() {
+            TextInjector.deleteBackward(base.insertedCount)
+        }
+
+        state.status = .transcribing
+        refreshUI()
+        startTranscribeWatchdog(seconds: 60)
+
+        let apiKey = state.apiKey
+        let model = state.model
+        let instruction = AppState.amendInstruction(previous: base.text)
+
+        transcribeGeneration += 1
+        let gen = transcribeGeneration
+        transcribeTask?.cancel()
+        transcribeTask = Task {
+            let outcome: Result<TranscriptionResult, Error>
+            do {
+                outcome = .success(try await GeminiClient.amend(
+                    originalAudioURL: base.audioURL, amendAudioURL: amendAudioURL,
+                    apiKey: apiKey, model: model, instruction: instruction,
+                    thinkingBudget: AppState.smallThinkingBudget))
+            } catch {
+                outcome = .failure(error)
+            }
+            try? FileManager.default.removeItem(at: amendAudioURL)
+            await MainActor.run { [weak self] in
+                guard let self, gen == self.transcribeGeneration else {
+                    try? FileManager.default.removeItem(at: base.audioURL)
+                    return
+                }
+                switch outcome {
+                case .success(let result):
+                    self.state.recordUsage(input: result.inputTokens, output: result.outputTokens, model: model)
+                    self.handleRetriedTranscription(result.text, replacing: base, audioURL: base.audioURL)
+                case .failure(let error):
+                    // The base text is already deleted; keep the original audio so a
+                    // double-tap retry can still recover a transcription of it.
+                    self.lastTake = RetryableTake(audioURL: base.audioURL, text: base.text,
+                                                  insertedCount: 0, completedAt: Date())
+                    let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.handleError(message, title: "Amend failed")
                 }
             }
         }
@@ -604,6 +685,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func cancelRecording() {
         guard state.status == .recording else { return }
         stopRecordTimer()
+        amendTake = nil
         if let result = recorder.stop() {
             try? FileManager.default.removeItem(at: result.url)
         }
@@ -628,6 +710,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcribeTask = nil
         stopTranscribeWatchdog()
         stopRecordTimer()
+        amendTake = nil
         if state.status == .recording, state.playSounds { Sound.stop() }
         if let leftover = recorder.stop() { try? FileManager.default.removeItem(at: leftover.url) }
         unmuteAudioIfMuted()

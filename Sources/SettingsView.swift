@@ -239,11 +239,11 @@ struct SettingsView: View {
     private var retryHelp: String {
         switch state.retryTrigger {
         case .doubleTap:
-            return "Double-tap the talk hotkey within 30 seconds of a take: the text it inserted is deleted and the same audio goes back to Gemini for a more careful second pass."
+            return "Double-tap the talk hotkey within 30 seconds of a take: the text it inserted is deleted and the same audio goes back to Gemini for a more careful second pass. Or tap once then HOLD to amend: speak a change (“add ‘by Friday’ at the end”, “make the second sentence a question”) and the last text is rewritten with it."
         case .hotkey:
-            return "Tap the retry hotkey within 30 seconds of a take: the text it inserted is deleted and the same audio goes back to Gemini for a more careful second pass."
+            return "Tap the retry hotkey within 30 seconds of a take: the text it inserted is deleted and the same audio goes back to Gemini for a more careful second pass. Amending still works on the talk key: tap once then HOLD, and speak the change."
         case .off:
-            return "No retry shortcut. Retry Last Take stays available in the menu bar for 30 seconds after each take."
+            return "No retry or amend gestures. Retry Last Take stays available in the menu bar for 30 seconds after each take."
         }
     }
 
